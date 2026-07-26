@@ -18,5 +18,3 @@ services:
         value: https://kairo-omega.vercel.app/
       - key: HEADLESS
         value: "true"
-      - key: PYTHON_VERSION
-        value: 3.12.7
