@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reply Assistant</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="header">
+      <div class="header-top">
+        <h1>Reply Assistant</h1>
+        <button id="active-toggle" class="pill">
+          <span class="dot"></span>
+          <span id="active-label">Active</span>
+        </button>
+      </div>
+      <div class="stats">
+        <span><b id="stat-pending">0</b> waiting</span>
+        <span><b id="stat-posted">0</b> posted today</span>
+        <span><b id="stat-skipped">0</b> skipped</span>
+      </div>
+      <div id="x-login-warning" class="hidden" style="font-size:11.5px;color:#C0736B;padding-bottom:10px;">
+        Not logged into X yet — chat &amp; URL reading still work, but scanning/posting is paused.
+      </div>
+      <div class="tabs">
+        <button class="tab active" data-tab="feed">Feed</button>
+        <button class="tab" data-tab="chat">Chat</button>
+      </div>
+    </header>
+
+    <main id="feed-view">
+      <div id="feed-list"></div>
+    </main>
+
+    <main id="chat-view" class="hidden">
+      <div id="chat-messages"></div>
+      <div id="chat-input-row">
+        <input id="chat-input" type="text" placeholder="Tell it what to do, or ask about its activity..." />
+        <button id="chat-send">Send</button>
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

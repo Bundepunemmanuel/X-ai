@@ -295,31 +295,44 @@ def run_loop():
     xb = XBrowser()
     xb.start()
     _xb_instance = xb
-    print("[agent] browser started, entering main loop")
+    print("[agent] browser started (usable for page reads immediately)")
+
+    xb.try_login()  # non-fatal — logs and continues either way
+    if xb.logged_in:
+        print("[agent] X login successful, entering main loop")
+    else:
+        print("[agent] X login not active — scanning/posting to X paused, "
+              "but chat and URL-reading still work. Will retry login periodically.")
 
     last_scan = 0
     last_notification_check = 0
     last_original_post_check = 0
+    last_login_retry = time.time()
 
     try:
         while True:
             now = time.time()
 
-            if now - last_scan > config.SCAN_INTERVAL_SECONDS:
+            if not xb.logged_in and now - last_login_retry > 10 * 60:  # retry every 10 min
+                print("[agent] retrying X login")
+                xb.try_login()
+                last_login_retry = now
+
+            if xb.logged_in and now - last_scan > config.SCAN_INTERVAL_SECONDS:
                 try:
                     scan_and_draft(xb)
                 except Exception as e:
                     print(f"[agent] scan error: {e}")
                 last_scan = now
 
-            if now - last_notification_check > config.NOTIFICATION_CHECK_INTERVAL_SECONDS:
+            if xb.logged_in and now - last_notification_check > config.NOTIFICATION_CHECK_INTERVAL_SECONDS:
                 try:
                     check_notifications(xb)
                 except Exception as e:
                     print(f"[agent] notification check error: {e}")
                 last_notification_check = now
 
-            if now - last_original_post_check > 6 * 60 * 60:  # check every 6 hours
+            if xb.logged_in and now - last_original_post_check > 6 * 60 * 60:  # check every 6 hours
                 try:
                     maybe_post_original(xb)
                 except Exception as e:

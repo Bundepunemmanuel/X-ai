@@ -28,6 +28,7 @@ class XBrowser:
         self._browser = None
         self._context = None
         self._page = None
+        self.logged_in = False
 
     def start(self):
         self._playwright = sync_playwright().start()
@@ -39,7 +40,29 @@ class XBrowser:
             self._context = self._browser.new_context()
             print("[browser] no saved session found, starting fresh")
         self._page = self._context.new_page()
-        self._ensure_logged_in()
+        # NOTE: login is intentionally NOT attempted here. The browser is usable
+        # for general page-reading (e.g. chat asking it to look at a URL) as soon
+        # as it starts, independent of whether X credentials are configured or
+        # whether login succeeds. Call try_login() separately for X-specific work.
+        self.logged_in = False
+
+    def try_login(self) -> bool:
+        """Attempts X login if credentials are configured. Never raises — returns
+        True/False and logs the outcome, so a missing/failing login doesn't take
+        down the rest of the browser's usefulness (e.g. reading external URLs)."""
+        if not config.X_USERNAME or not config.X_PASSWORD:
+            print("[browser] X_USERNAME/X_PASSWORD not set — skipping X login. "
+                  "General page-reading still works, but scanning/posting to X won't until these are set.")
+            self.logged_in = False
+            return False
+        try:
+            self._ensure_logged_in()
+            self.logged_in = True
+            return True
+        except Exception as e:
+            print(f"[browser] X login failed: {e}")
+            self.logged_in = False
+            return False
 
     def stop(self):
         if self._context:

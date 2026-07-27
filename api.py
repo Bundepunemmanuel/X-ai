@@ -22,10 +22,12 @@ URL_PATTERN = re.compile(r"https?://\S+")
 def get_feed():
     drafts = storage.get_pending_drafts()
     counts = storage.get_today_counts()
+    xb = agent.get_browser()
     return {
         "drafts": drafts,
         "counts": counts,
         "active": storage.is_active(),
+        "x_logged_in": bool(xb and xb.logged_in),
         "recent_activity": storage.get_recent_activity(10),
     }
 

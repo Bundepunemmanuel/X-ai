@@ -46,13 +46,11 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 
 
 def validate():
-    """Call at startup — fail loudly instead of quietly misbehaving with missing config."""
-    missing = []
-    if not X_USERNAME:
-        missing.append("X_USERNAME")
-    if not X_PASSWORD:
-        missing.append("X_PASSWORD")
+    """Call at startup — fail loudly for what's truly required to run at all.
+    X credentials are checked separately (see browser.try_login) since the
+    browser/chat's URL-reading should still work without them."""
     if not GEMINI_API_KEY:
-        missing.append("GEMINI_API_KEY")
-    if missing:
-        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+        raise RuntimeError("Missing required environment variable: GEMINI_API_KEY")
+    if not X_USERNAME or not X_PASSWORD:
+        print("[config] X_USERNAME/X_PASSWORD not set — X scanning/posting will be "
+              "disabled until these are added, but the rest of the app will still run.")
