@@ -356,6 +356,10 @@ Write only the post text. Nothing else."""
 
 # ─── Chat panel: answer questions about the assistant's own activity ───────
 def chat_respond(user_message: str, activity_context: str, chat_history: str = "", page_content: str = "") -> str:
+    url_context = ""
+    if page_content:
+        url_context = "They shared a URL. Here is the actual page content that was just fetched:\n" + page_content[:2000]
+
     prompt = f"""You are the X reply assistant itself, talking directly to your operator in a
 dashboard chat panel. Be direct and concise, like a capable assistant giving a status update or
 taking an instruction — not like a generic chatbot.
@@ -368,7 +372,7 @@ Recent conversation:
 
 Operator's message: "{user_message}"
 
-{"They shared a URL. Here is the actual page content that was just fetched:\\n" + page_content[:2000] if page_content else ""}
+{url_context}
 
 CRITICAL: You have no background task system and no memory beyond what's shown above. Never claim
 you're "scanning," "analyzing in the background," or "will update you when complete" — you can't do
