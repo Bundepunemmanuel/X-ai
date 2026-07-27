@@ -50,13 +50,43 @@ class XBrowser:
 
     def start(self):
         self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(headless=config.HEADLESS)
+        self._browser = self._playwright.chromium.launch(
+            headless=config.HEADLESS,
+            args=[
+                # this specific flag is the main thing sites check for to detect
+                # headless/automated Chromium — disabling it removes that signal
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+            ],
+        )
+        context_kwargs = {
+            # a realistic desktop Chrome UA instead of Playwright's default,
+            # which otherwise announces itself as an automated/headless client
+            "user_agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            ),
+            "viewport": {"width": 1280, "height": 800},
+            "locale": "en-US",
+            "timezone_id": "America/New_York",
+        }
         try:
-            self._context = self._browser.new_context(storage_state=config.SESSION_STATE_PATH)
+            self._context = self._browser.new_context(
+                storage_state=config.SESSION_STATE_PATH, **context_kwargs
+            )
             print("[browser] reusing saved session")
         except Exception:
-            self._context = self._browser.new_context()
+            self._context = self._browser.new_context(**context_kwargs)
             print("[browser] no saved session found, starting fresh")
+
+        # extra layer: explicitly hide the webdriver flag on every page before any
+        # site JS runs, since some anti-bot checks look for navigator.webdriver
+        # even with the launch flag above already suppressing it in most cases
+        self._context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+        )
+
         self._page = self._context.new_page()
         # NOTE: login is intentionally NOT attempted here. The browser is usable
         # for general page-reading (e.g. chat asking it to look at a URL) as soon
