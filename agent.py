@@ -2,10 +2,17 @@
 agent.py — the main background loop: scan for threads, classify, draft,
 queue for approval (or auto-post if trusted), respect pacing caps.
 Runs continuously in a background thread started by main.py.
+
+THREADING NOTE: Playwright's sync API is not safe to call from multiple threads.
+The XBrowser instance lives entirely inside the background loop's thread. Any other
+thread (like FastAPI's request handlers in api.py) that needs the browser to do
+something must go through submit_browser_task() below, which queues the work and
+lets the loop's own thread execute it, rather than touching Playwright directly.
 """
 
 import time
 import threading
+import queue
 import random
 
 import config
@@ -22,6 +29,31 @@ SEARCH_QUERIES = [
     "\"what are you working on\"",
     "\"share your startup\"",
 ]
+
+_task_queue = queue.Queue()
+
+
+def submit_browser_task(fn, *args, timeout=45, **kwargs):
+    """Call from any thread other than the agent loop's own thread. Queues fn(*args, **kwargs)
+    to run inside the browser thread, blocks until it completes, and returns its result
+    (or raises whatever exception it raised)."""
+    result_holder = {}
+    done_event = threading.Event()
+
+    def _wrapped():
+        try:
+            result_holder["value"] = fn(*args, **kwargs)
+        except Exception as e:
+            result_holder["error"] = e
+        finally:
+            done_event.set()
+
+    _task_queue.put(_wrapped)
+    if not done_event.wait(timeout=timeout):
+        raise TimeoutError("Browser task timed out — the agent loop may be busy or unresponsive")
+    if "error" in result_holder:
+        raise result_holder["error"]
+    return result_holder.get("value")
 
 
 def _can_post_reply_now() -> bool:
@@ -129,7 +161,9 @@ def _post_draft(xb: XBrowser, draft_id: int):
 
 
 def approve_draft(xb: XBrowser, draft_id: int, edited_text: str = None):
-    """Called from the API when the user taps Approve (with optional edited text)."""
+    """Called from the API when the user taps Approve (with optional edited text).
+    NOTE: xb is passed in for reference/nullability checks, but the actual Playwright
+    call is routed through submit_browser_task so it runs on the correct thread."""
     draft = storage.get_draft(draft_id)
     if not draft:
         return False
@@ -139,7 +173,12 @@ def approve_draft(xb: XBrowser, draft_id: int, edited_text: str = None):
         storage.log_activity("Pacing cap reached — approval queued but not posted yet")
         return False
 
-    success = xb.post_reply(draft["thread_url"], text_to_post)
+    try:
+        success = submit_browser_task(xb.post_reply, draft["thread_url"], text_to_post)
+    except Exception as e:
+        storage.log_activity(f"Failed to post reply to {draft['author_handle']}: {e}")
+        return False
+
     if success:
         storage.update_draft_status(draft_id, "approved", draft_text=text_to_post)
         storage.mark_draft_posted(draft_id)
@@ -236,6 +275,17 @@ def get_browser():
     return _xb_instance
 
 
+def fetch_url_for_chat(url: str) -> str:
+    """Thread-safe wrapper api.py can call to fetch a URL through the live browser session."""
+    xb = get_browser()
+    if xb is None:
+        return "(browser isn't ready yet, try again shortly)"
+    try:
+        return submit_browser_task(xb.read_external_link, url)
+    except Exception as e:
+        return f"(could not load that page: {e})"
+
+
 def run_loop():
     """Entry point for the background thread. Runs forever until process exit."""
     global _xb_instance
@@ -275,6 +325,18 @@ def run_loop():
                 except Exception as e:
                     print(f"[agent] original post error: {e}")
                 last_original_post_check = now
+
+            # run any queued cross-thread browser tasks (e.g. chat asking to fetch a URL)
+            # right here, in this thread, since Playwright must stay single-threaded
+            while True:
+                try:
+                    task = _task_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    task()
+                except Exception as e:
+                    print(f"[agent] queued browser task failed: {e}")
 
             time.sleep(30)
     finally:

@@ -3,6 +3,8 @@ api.py — all dashboard-facing HTTP endpoints, mounted onto the FastAPI app in 
 Talks to storage.py for data and agent.py for actions that need the live browser.
 """
 
+import re
+
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -11,6 +13,8 @@ import agent
 import llm
 
 router = APIRouter()
+
+URL_PATTERN = re.compile(r"https?://\S+")
 
 
 # ─── Feed: pending drafts + approve/edit/skip ──────────────────────────────
@@ -60,7 +64,15 @@ def chat(body: ChatRequest):
     history = storage.get_chat_history(10)
     history_text = "\n".join(f"{h['role']}: {h['content']}" for h in history)
 
-    reply = llm.chat_respond(body.message, activity_text, history_text)
+    # if the message contains a URL, actually fetch it now (synchronously) rather
+    # than letting the model claim it's "scanning in the background" — it has no
+    # background task system, so that would be a hallucinated capability.
+    page_content = ""
+    urls = URL_PATTERN.findall(body.message)
+    if urls:
+        page_content = agent.fetch_url_for_chat(urls[0])
+
+    reply = llm.chat_respond(body.message, activity_text, history_text, page_content)
     storage.add_chat_message("assistant", reply)
     return {"reply": reply}
 
