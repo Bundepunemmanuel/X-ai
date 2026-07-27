@@ -94,7 +94,19 @@ class XBrowser:
     def _is_logged_in(self) -> bool:
         self._page.goto(f"{BASE_URL}/home", wait_until="domcontentloaded")
         time.sleep(2)
-        return "login" not in self._page.url and "flow" not in self._page.url
+        if "login" in self._page.url or "flow" in self._page.url:
+            return False
+        # the URL alone isn't reliable — X sometimes shows a logged-out view at
+        # /home without redirecting to an obvious /login URL. Confirm by checking
+        # for an element that only renders for an authenticated session.
+        try:
+            self._page.locator('[data-testid="SideNav_NewTweet_Button"]').first.wait_for(
+                state="visible", timeout=8000
+            )
+            return True
+        except Exception:
+            print("[browser] /home loaded but no authenticated UI found — treating as logged out")
+            return False
 
     def _ensure_logged_in(self):
         if self._is_logged_in():
