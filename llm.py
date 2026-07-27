@@ -78,9 +78,11 @@ def _call_gemini(prompt: str, temperature: float = 0.8, max_tokens: int = 400) -
         parts = candidates[0].get("content", {}).get("parts", [])
         text = "".join(p.get("text", "") for p in parts)
         finish_reason = candidates[0].get("finishReason")
-        if finish_reason == "MAX_TOKENS" and not text.strip():
-            print("[llm] gemini truncated with no usable content")
-            return ""
+        if finish_reason == "MAX_TOKENS":
+            print(f"[llm] gemini hit MAX_TOKENS (budget={max_tokens}); "
+                  f"{'returning empty' if not text.strip() else 'returning partial text, may be cut off'}")
+            if not text.strip():
+                return ""
         return text.strip()
     except Exception as e:
         print(f"[llm] gemini request failed: {e}")
@@ -354,11 +356,27 @@ Write only the post text. Nothing else."""
     return _post_process(reply, config.PRODUCT_NAME)
 
 
+def _clean_chat_reply(text: str) -> str:
+    """Strip stray markdown bullets/asterisks and, if the reply looks cut off
+    mid-sentence, trim back to the last complete sentence rather than showing
+    a dangling fragment."""
+    if not text:
+        return text
+    cleaned = re.sub(r"^[\s*•\-]+", "", text.strip())
+    cleaned = re.sub(r"\n[\s*•\-]+", "\n", cleaned)
+
+    if cleaned and cleaned[-1] not in ".!?\"'":
+        sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+        if len(sentences) > 1:
+            cleaned = " ".join(sentences[:-1]).strip()
+    return cleaned or text.strip()
+
+
 # ─── Chat panel: answer questions about the assistant's own activity ───────
 def chat_respond(user_message: str, activity_context: str, chat_history: str = "", page_content: str = "") -> str:
     url_context = ""
     if page_content:
-        url_context = "They shared a URL. Here is the actual page content that was just fetched:\n" + page_content[:2000]
+        url_context = "They shared a URL. Here is the actual page content that was just fetched:\n" + page_content[:1200]
 
     prompt = f"""You are the X reply assistant itself, talking directly to your operator in a
 dashboard chat panel. Be direct and concise, like a capable assistant giving a status update or
@@ -383,5 +401,9 @@ If they're asking about your activity, answer using the activity log above — d
 If they're giving you an instruction (e.g. change pacing, avoid a topic, prioritize something),
 acknowledge it clearly and specifically.
 
-Respond in 1-4 sentences. No markdown formatting, just plain text."""
-    return _call_gemini(prompt, temperature=0.6, max_tokens=450) or "Sorry, I couldn't process that — try again?"
+STRICT LIMIT: under 50 words total, as plain sentences. No bullet points, no asterisks, no markdown
+of any kind — just plain conversational text."""
+    raw = _call_gemini(prompt, temperature=0.6, max_tokens=800)
+    if not raw:
+        return "Sorry, I couldn't process that — try again?"
+    return _clean_chat_reply(raw)
