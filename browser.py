@@ -108,6 +108,50 @@ class XBrowser:
             print("[browser] /home loaded but no authenticated UI found — treating as logged out")
             return False
 
+    def _find_username_field(self, page, timeout_ms=25000):
+        """Looks for the username field on the main page first, then falls back to
+        searching inside any iframes (some login/verification flows embed the actual
+        form in a frame). Returns a Locator, or None if not found anywhere."""
+        try:
+            field = page.locator('input[autocomplete="username"]').first
+            field.wait_for(state="visible", timeout=timeout_ms)
+            return field
+        except Exception:
+            pass
+
+        # fallback: search every frame on the page, not just the main one
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            for frame in page.frames:
+                try:
+                    field = frame.locator('input[autocomplete="username"]').first
+                    if field.count() > 0 and field.is_visible():
+                        print(f"[browser] found username field inside an iframe ({frame.url})")
+                        return field
+                except Exception:
+                    continue
+            time.sleep(1)
+        return None
+
+    def _detect_challenge(self, page) -> str:
+        """Checks page content for known bot-verification/CAPTCHA indicators, so a
+        login failure can be diagnosed definitively instead of guessed at again."""
+        try:
+            content = page.content().lower()
+            indicators = {
+                "arkose": "Arkose Labs bot-verification challenge",
+                "funcaptcha": "FunCaptcha challenge",
+                "hcaptcha": "hCaptcha challenge",
+                "unusual login activity": "X's 'unusual login activity' verification step",
+                "verify your identity": "identity verification step",
+            }
+            for key, label in indicators.items():
+                if key in content:
+                    return label
+        except Exception:
+            pass
+        return ""
+
     def _ensure_logged_in(self):
         if self._is_logged_in():
             print("[browser] session already valid, skipping login")
@@ -118,13 +162,13 @@ class XBrowser:
         page.goto(f"{BASE_URL}/i/flow/login", wait_until="domcontentloaded")
         time.sleep(2)
 
-        # username step
-        try:
-            username_field = page.locator('input[autocomplete="username"]').first
-            username_field.wait_for(state="visible", timeout=15000)
-        except Exception as e:
+        # username step — checks main page, then iframes, with a longer wait
+        username_field = self._find_username_field(page)
+        if username_field is None:
+            challenge = self._detect_challenge(page)
             _save_debug_screenshot(page, "login_username_field_missing")
-            raise RuntimeError(f"Username field never appeared on login page: {e}")
+            reason = f" — detected: {challenge}" if challenge else " — no known challenge detected, see screenshot"
+            raise RuntimeError(f"Username field never appeared on login page{reason}")
 
         username_field.fill(config.X_USERNAME)
         page.keyboard.press("Enter")
@@ -135,19 +179,21 @@ class XBrowser:
         try:
             page.wait_for_selector('input[name="password"]', timeout=8000)
         except Exception:
+            challenge = self._detect_challenge(page)
             _save_debug_screenshot(page, "login_unexpected_checkpoint")
-            print("[browser] unexpected extra verification step — manual login may be required")
-            raise RuntimeError("X login requires manual verification step (unexpected checkpoint) — check /api/debug/screenshot")
+            reason = f": {challenge}" if challenge else " (unknown checkpoint, see /api/debug/screenshot)"
+            print(f"[browser] unexpected extra verification step{reason}")
+            raise RuntimeError(f"X login requires manual verification step{reason}")
 
         page.fill('input[name="password"]', config.X_PASSWORD)
         page.keyboard.press("Enter")
         time.sleep(3)
 
         if not self._is_logged_in():
+            challenge = self._detect_challenge(page)
             _save_debug_screenshot(page, "login_final_check_failed")
-            raise RuntimeError(
-                "X login failed — check credentials, or a 2FA/verification step is blocking automated login (see /api/debug/screenshot)"
-            )
+            reason = f": {challenge}" if challenge else " (see /api/debug/screenshot)"
+            raise RuntimeError(f"X login failed{reason} — check credentials, or a 2FA/verification step is blocking automated login")
 
         self._context.storage_state(path=config.SESSION_STATE_PATH)
         print("[browser] login successful, session saved")
