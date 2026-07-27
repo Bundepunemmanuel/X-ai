@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse
 
 import agent
 import api
+from browser import DEBUG_SCREENSHOT_PATH
 
 app = FastAPI(title="X Reply Assistant")
 
@@ -26,6 +27,16 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 @app.get("/")
 def dashboard():
     return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+
+
+@app.get("/api/debug/screenshot")
+def debug_screenshot():
+    """Open this URL directly in a browser to see exactly what X rendered the
+    last time an interactive action (like, reply, compose) failed. Only shows
+    up once something has actually failed — check Render logs for the label."""
+    if os.path.exists(DEBUG_SCREENSHOT_PATH):
+        return FileResponse(DEBUG_SCREENSHOT_PATH, media_type="image/png")
+    return {"error": "No debug screenshot saved yet — nothing has failed since the last restart."}
 
 
 @app.on_event("startup")

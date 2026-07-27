@@ -20,6 +20,23 @@ import config
 BASE_URL = "https://x.com"
 
 
+import os
+
+DEBUG_SCREENSHOT_PATH = "/tmp/debug_last_failure.png"
+
+
+def _save_debug_screenshot(page, label: str):
+    """Saves a screenshot of whatever the page currently shows, whenever an
+    interactive action fails. Lets you actually SEE what X is rendering
+    (an interstitial, a challenge, a restricted view, etc.) instead of guessing
+    from a timeout message alone. View it at /api/debug/screenshot on the dashboard."""
+    try:
+        page.screenshot(path=DEBUG_SCREENSHOT_PATH)
+        print(f"[browser] saved debug screenshot for '{label}' — view at /api/debug/screenshot")
+    except Exception as e:
+        print(f"[browser] could not save debug screenshot: {e}")
+
+
 class XBrowser:
     """Wraps a single persistent Playwright browser context for the assistant account."""
 
@@ -242,6 +259,7 @@ class XBrowser:
         except Exception as e:
             print(f"[browser] failed to like {thread_url}: {e}")
             self.last_error = f"Failed to like post: {e}"
+            _save_debug_screenshot(page, "like_post")
             return False
 
     # ─── Posting a reply ─────────────────────────────────────────────────
@@ -262,6 +280,7 @@ class XBrowser:
             return True
         except Exception as e:
             print(f"[browser] failed to post reply to {thread_url}: {e}")
+            _save_debug_screenshot(page, "post_reply")
             return False
 
     # ─── Posting an original post ────────────────────────────────────────
@@ -282,6 +301,7 @@ class XBrowser:
             return True
         except Exception as e:
             print(f"[browser] /compose/post path failed ({e}), trying home feed compose button fallback")
+            _save_debug_screenshot(page, "compose_post_primary")
 
         # fallback: go to home feed and click the "New post" button to open the composer,
         # since X's dedicated compose URL doesn't always render reliably
@@ -305,6 +325,7 @@ class XBrowser:
         except Exception as e:
             print(f"[browser] home feed compose fallback also failed: {e}")
             self.last_error = f"Both compose paths failed to post original post: {e}"
+            _save_debug_screenshot(page, "compose_post_fallback")
             return False
 
     # ─── Notifications / mentions (replies to the assistant's own posts) ─
