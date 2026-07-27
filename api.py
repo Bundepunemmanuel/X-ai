@@ -60,6 +60,21 @@ class ChatRequest(BaseModel):
 def chat(body: ChatRequest):
     storage.add_chat_message("user", body.message)
 
+    # direct, verifiable action: "like <url>" — bypasses the LLM entirely for the
+    # confirmation, since this is exactly the kind of "prove it's real" action that
+    # should never be answered by a guess. It shows up on the actual X account.
+    urls = URL_PATTERN.findall(body.message)
+    if urls and re.search(r"\blike\b", body.message, re.I):
+        success, error = agent.like_url_for_chat(urls[0])
+        if success:
+            reply = f"Done — liked {urls[0]}. Check your X account's Likes tab to confirm."
+            storage.log_activity(f"Liked a post via chat command: {urls[0]}")
+        else:
+            reply = f"Couldn't like that post: {error}"
+            storage.log_activity(f"Failed to like {urls[0]} via chat: {error}")
+        storage.add_chat_message("assistant", reply)
+        return {"reply": reply}
+
     activity = storage.get_recent_activity(15)
     activity_text = "\n".join(f"- {a['message']}" for a in activity) or "No activity yet."
 

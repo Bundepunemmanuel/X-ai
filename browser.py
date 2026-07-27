@@ -187,7 +187,7 @@ class XBrowser:
         """Opens an external URL in a new tab and grabs visible text content. Best-effort."""
         try:
             new_page = self._context.new_page()
-            new_page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            new_page.goto(url, wait_until="domcontentloaded", timeout=25000)
             time.sleep(1.5)
             text = new_page.locator("body").inner_text()
             new_page.close()
@@ -226,6 +226,23 @@ class XBrowser:
         except Exception as e:
             print(f"[browser] web search failed for '{query}': {e}")
             return []
+
+    # ─── Liking a post (simplest possible way to verify login works for real) ─
+    def like_post(self, thread_url: str) -> bool:
+        page = self._page
+        try:
+            page.goto(thread_url, wait_until="domcontentloaded")
+            time.sleep(2)
+            like_button = page.locator('[data-testid="like"]').first
+            like_button.wait_for(state="visible", timeout=15000)
+            like_button.click()
+            time.sleep(1.5)
+            print(f"[browser] liked {thread_url}")
+            return True
+        except Exception as e:
+            print(f"[browser] failed to like {thread_url}: {e}")
+            self.last_error = f"Failed to like post: {e}"
+            return False
 
     # ─── Posting a reply ─────────────────────────────────────────────────
     def post_reply(self, thread_url: str, reply_text: str) -> bool:

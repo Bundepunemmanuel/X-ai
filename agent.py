@@ -33,7 +33,7 @@ SEARCH_QUERIES = [
 _task_queue = queue.Queue()
 
 
-def submit_browser_task(fn, *args, timeout=45, **kwargs):
+def submit_browser_task(fn, *args, timeout=90, **kwargs):
     """Call from any thread other than the agent loop's own thread. Queues fn(*args, **kwargs)
     to run inside the browser thread, blocks until it completes, and returns its result
     (or raises whatever exception it raised)."""
@@ -325,6 +325,21 @@ def search_web_for_chat(query: str):
         return []
 
 
+def like_url_for_chat(url: str):
+    """Thread-safe wrapper: actually likes a post via the live browser session.
+    Returns (success: bool, error: str or None) — real result, not an LLM guess."""
+    xb = get_browser()
+    if xb is None:
+        return False, "browser isn't ready yet"
+    if not xb.logged_in:
+        return False, "not logged into X yet"
+    try:
+        success = submit_browser_task(xb.like_post, url)
+        return success, (None if success else (xb.last_error or "unknown failure"))
+    except Exception as e:
+        return False, str(e)
+
+
 def fetch_url_for_chat(url: str) -> str:
     """Thread-safe wrapper api.py can call to fetch a URL through the live browser session."""
     xb = get_browser()
@@ -391,8 +406,10 @@ def run_loop():
                     print(f"[agent] original post error: {e}")
                 last_original_post_check = now
 
-            # run any queued cross-thread browser tasks (e.g. chat asking to fetch a URL)
-            # right here, in this thread, since Playwright must stay single-threaded
+            # run any queued cross-thread browser tasks (e.g. chat asking to fetch a URL,
+            # or a dashboard approval) right here, in this thread, since Playwright must
+            # stay single-threaded. Checked frequently (every ~3s below) so these don't
+            # sit waiting behind a full 30s scan cycle.
             while True:
                 try:
                     task = _task_queue.get_nowait()
@@ -403,7 +420,7 @@ def run_loop():
                 except Exception as e:
                     print(f"[agent] queued browser task failed: {e}")
 
-            time.sleep(30)
+            time.sleep(3)
     finally:
         xb.stop()
 
