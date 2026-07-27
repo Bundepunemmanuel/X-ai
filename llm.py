@@ -183,7 +183,7 @@ Rules:
 - Don't add new claims or facts
 
 Write only the rewritten reply. Nothing else."""
-    raw = _call_gemini(prompt, temperature=0.9, max_tokens=400)
+    raw = _call_gemini(prompt, temperature=0.9, max_tokens=600)
     return raw if raw else original
 
 
@@ -223,7 +223,7 @@ Decide one of three actions:
 Respond with ONLY a JSON object, no markdown, no explanation:
 {{"action": "question" or "mention" or "skip", "reasoning": "one short sentence why", "pain_quote": "the exact phrase that reveals their pain, or null"}}"""
 
-    raw = _call_gemini(prompt, temperature=0.4, max_tokens=450)
+    raw = _call_gemini(prompt, temperature=0.4, max_tokens=600)
     parsed = _parse_json(raw)
     if not parsed or parsed.get("action") not in ("question", "mention", "skip"):
         return {"action": "skip", "reasoning": "classification failed", "pain_quote": None}
@@ -258,7 +258,7 @@ Rules:
 - Do not mention {config.PRODUCT_NAME} at all in this reply
 
 Write only the reply text. Nothing else."""
-        reply = _call_gemini(prompt, temperature=0.85, max_tokens=300)
+        reply = _call_gemini(prompt, temperature=0.85, max_tokens=600)
         return _post_process(reply)
 
     elif action == "mention":
@@ -290,7 +290,7 @@ Rules:
   or slightly inconsistent capitalization. Pick only one, don't force a tidy closing line.
 
 Write only the reply text. Nothing else."""
-        reply = _call_gemini(prompt, temperature=0.85, max_tokens=450)
+        reply = _call_gemini(prompt, temperature=0.85, max_tokens=600)
         return _post_process(reply, config.PRODUCT_NAME)
 
     return ""
@@ -322,7 +322,7 @@ If status is "open" and needs_human is false, the reply should:
 - Sound like a real person continuing a conversation
 - Respond to ONE thing they said, not a comprehensive follow-up"""
 
-    raw = _call_gemini(prompt, temperature=0.75, max_tokens=450)
+    raw = _call_gemini(prompt, temperature=0.75, max_tokens=600)
     parsed = _parse_json(raw)
     if not parsed:
         return {"status": "open", "reply": "", "needs_human": True}
@@ -352,7 +352,7 @@ Rules:
 - No hashtags
 
 Write only the post text. Nothing else."""
-    reply = _call_gemini(prompt, temperature=0.85, max_tokens=300)
+    reply = _call_gemini(prompt, temperature=0.85, max_tokens=600)
     return _post_process(reply, config.PRODUCT_NAME)
 
 

@@ -151,45 +151,78 @@ def _post_draft(xb: XBrowser, draft_id: int):
     draft = storage.get_draft(draft_id)
     if not draft:
         return
-    success = xb.post_reply(draft["thread_url"], draft["draft_text"])
+    draft_type = draft["draft_type"]
+
+    if draft_type == "original_post":
+        success = xb.post_original(draft["draft_text"])
+    elif draft_type == "dm":
+        success = xb.send_dm(draft["thread_url"], draft["draft_text"])
+    else:
+        success = xb.post_reply(draft["thread_url"], draft["draft_text"])
+
     if success:
         storage.mark_draft_posted(draft_id)
-        storage.increment_counter("replies_posted")
-        if draft["draft_type"] == "mention":
-            storage.increment_counter("mentions_posted")
-        storage.log_activity(f"Auto-posted reply to {draft['author_handle']}")
+        if draft_type == "original_post":
+            storage.increment_counter("original_posts_posted")
+        else:
+            storage.increment_counter("replies_posted")
+            if draft_type == "mention":
+                storage.increment_counter("mentions_posted")
+        storage.log_activity(f"Auto-posted ({draft_type}) for {draft['author_handle']}")
     else:
-        storage.log_activity(f"Failed to post reply to {draft['author_handle']}")
+        storage.log_activity(f"Failed to auto-post ({draft_type}) for {draft['author_handle']}")
 
 
 def approve_draft(xb: XBrowser, draft_id: int, edited_text: str = None):
     """Called from the API when the user taps Approve (with optional edited text).
+    Returns (success: bool, error_message: str or None).
     NOTE: xb is passed in for reference/nullability checks, but the actual Playwright
     call is routed through submit_browser_task so it runs on the correct thread."""
     draft = storage.get_draft(draft_id)
     if not draft:
-        return False
+        return False, "Draft not found"
     text_to_post = edited_text if edited_text else draft["draft_text"]
+    draft_type = draft["draft_type"]
 
-    if not _can_post_reply_now():
-        storage.log_activity("Pacing cap reached — approval queued but not posted yet")
-        return False
+    # pacing check differs by type — original posts have their own daily cap,
+    # not the reply pacing cap
+    if draft_type == "original_post":
+        if not _can_post_original_today():
+            return False, "Original post cap reached for today"
+    else:
+        if not _can_post_reply_now():
+            storage.log_activity("Pacing cap reached — approval queued but not posted yet")
+            return False, "Reply pacing cap reached (15 per 30 min, or daily limit) — try again shortly"
 
     try:
-        success = submit_browser_task(xb.post_reply, draft["thread_url"], text_to_post)
+        if draft_type == "original_post":
+            success = submit_browser_task(xb.post_original, text_to_post)
+        elif draft_type == "dm":
+            success = submit_browser_task(xb.send_dm, draft["thread_url"], text_to_post)
+        else:
+            success = submit_browser_task(xb.post_reply, draft["thread_url"], text_to_post)
     except Exception as e:
-        storage.log_activity(f"Failed to post reply to {draft['author_handle']}: {e}")
-        return False
+        error_msg = f"Browser action failed: {e}"
+        storage.log_activity(f"Failed to post ({draft_type}) for {draft['author_handle']}: {e}")
+        return False, error_msg
 
-    if success:
-        storage.update_draft_status(draft_id, "approved", draft_text=text_to_post)
-        storage.mark_draft_posted(draft_id)
+    if not success:
+        storage.log_activity(f"Failed to post ({draft_type}) for {draft['author_handle']}")
+        return False, "Post action returned failure — check Render logs for details"
+
+    storage.update_draft_status(draft_id, "approved", draft_text=text_to_post)
+    storage.mark_draft_posted(draft_id)
+
+    if draft_type == "original_post":
+        storage.increment_counter("original_posts_posted")
+    else:
         storage.increment_counter("replies_posted")
-        if draft["draft_type"] == "mention":
+        if draft_type == "mention":
             storage.increment_counter("mentions_posted")
-        storage.record_approval(draft["style_key"])
-        storage.log_activity(f"Posted reply to {draft['author_handle']} (approved)")
-    return success
+
+    storage.record_approval(draft["style_key"])
+    storage.log_activity(f"Posted ({draft_type}) for {draft['author_handle']} (approved)")
+    return True, None
 
 
 def skip_draft(draft_id: int):
@@ -316,9 +349,11 @@ def run_loop():
     xb.try_login()  # non-fatal — logs and continues either way
     if xb.logged_in:
         print("[agent] X login successful, entering main loop")
+        storage.log_activity("Logged into X successfully — scanning and posting are active")
     else:
         print("[agent] X login not active — scanning/posting to X paused, "
               "but chat and URL-reading still work. Will retry login periodically.")
+        storage.log_activity("Not logged into X yet — scanning/posting paused, chat still works")
 
     last_scan = 0
     last_notification_check = 0

@@ -41,8 +41,8 @@ def approve(draft_id: int, body: ApproveRequest):
     xb = agent.get_browser()
     if xb is None:
         return {"success": False, "error": "browser not ready yet, try again shortly"}
-    success = agent.approve_draft(xb, draft_id, edited_text=body.edited_text)
-    return {"success": success}
+    success, error = agent.approve_draft(xb, draft_id, edited_text=body.edited_text)
+    return {"success": success, "error": error}
 
 
 @router.post("/api/drafts/{draft_id}/skip")
@@ -62,6 +62,10 @@ def chat(body: ChatRequest):
 
     activity = storage.get_recent_activity(15)
     activity_text = "\n".join(f"- {a['message']}" for a in activity) or "No activity yet."
+
+    xb = agent.get_browser()
+    login_status = "Currently logged into X and active." if (xb and xb.logged_in) else "Not currently logged into X — scanning/posting is paused, only chat and URL-reading work."
+    activity_text = f"X login status: {login_status}\n\n{activity_text}"
 
     history = storage.get_chat_history(10)
     history_text = "\n".join(f"{h['role']}: {h['content']}" for h in history)
