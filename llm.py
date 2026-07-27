@@ -62,6 +62,7 @@ def _call_gemini(prompt: str, temperature: float = 0.8, max_tokens: int = 400) -
                 "generationConfig": {
                     "temperature": temperature,
                     "maxOutputTokens": max_tokens,
+                    "thinkingConfig": {"thinkingLevel": "low"},
                 },
             },
             timeout=30,
@@ -180,7 +181,7 @@ Rules:
 - Don't add new claims or facts
 
 Write only the rewritten reply. Nothing else."""
-    raw = _call_gemini(prompt, temperature=0.9, max_tokens=200)
+    raw = _call_gemini(prompt, temperature=0.9, max_tokens=400)
     return raw if raw else original
 
 
@@ -220,7 +221,7 @@ Decide one of three actions:
 Respond with ONLY a JSON object, no markdown, no explanation:
 {{"action": "question" or "mention" or "skip", "reasoning": "one short sentence why", "pain_quote": "the exact phrase that reveals their pain, or null"}}"""
 
-    raw = _call_gemini(prompt, temperature=0.4, max_tokens=250)
+    raw = _call_gemini(prompt, temperature=0.4, max_tokens=450)
     parsed = _parse_json(raw)
     if not parsed or parsed.get("action") not in ("question", "mention", "skip"):
         return {"action": "skip", "reasoning": "classification failed", "pain_quote": None}
@@ -255,7 +256,7 @@ Rules:
 - Do not mention {config.PRODUCT_NAME} at all in this reply
 
 Write only the reply text. Nothing else."""
-        reply = _call_gemini(prompt, temperature=0.85, max_tokens=100)
+        reply = _call_gemini(prompt, temperature=0.85, max_tokens=300)
         return _post_process(reply)
 
     elif action == "mention":
@@ -287,7 +288,7 @@ Rules:
   or slightly inconsistent capitalization. Pick only one, don't force a tidy closing line.
 
 Write only the reply text. Nothing else."""
-        reply = _call_gemini(prompt, temperature=0.85, max_tokens=200)
+        reply = _call_gemini(prompt, temperature=0.85, max_tokens=450)
         return _post_process(reply, config.PRODUCT_NAME)
 
     return ""
@@ -319,7 +320,7 @@ If status is "open" and needs_human is false, the reply should:
 - Sound like a real person continuing a conversation
 - Respond to ONE thing they said, not a comprehensive follow-up"""
 
-    raw = _call_gemini(prompt, temperature=0.75, max_tokens=250)
+    raw = _call_gemini(prompt, temperature=0.75, max_tokens=450)
     parsed = _parse_json(raw)
     if not parsed:
         return {"status": "open", "reply": "", "needs_human": True}
@@ -349,7 +350,7 @@ Rules:
 - No hashtags
 
 Write only the post text. Nothing else."""
-    reply = _call_gemini(prompt, temperature=0.85, max_tokens=100)
+    reply = _call_gemini(prompt, temperature=0.85, max_tokens=300)
     return _post_process(reply, config.PRODUCT_NAME)
 
 
@@ -372,4 +373,4 @@ If they're giving you an instruction (e.g. change pacing, avoid a topic, priorit
 acknowledge it clearly and specifically.
 
 Respond in 1-4 sentences. No markdown formatting, just plain text."""
-    return _call_gemini(prompt, temperature=0.6, max_tokens=200) or "Sorry, I couldn't process that — try again?"
+    return _call_gemini(prompt, temperature=0.6, max_tokens=450) or "Sorry, I couldn't process that — try again?"
