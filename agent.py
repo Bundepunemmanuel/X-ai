@@ -14,6 +14,7 @@ import time
 import threading
 import queue
 import random
+import json
 
 import config
 import storage
@@ -338,6 +339,66 @@ def like_url_for_chat(url: str):
         return success, (None if success else (xb.last_error or "unknown failure"))
     except Exception as e:
         return False, str(e)
+
+
+def import_session(cookie_json_str: str):
+    """Accepts pasted cookie data (either a bare array of cookie objects, like what
+    Cookie-Editor exports, or a full Playwright storage_state object) and writes it
+    to the session file in the format Playwright expects, then reloads the live
+    browser session immediately. Returns (success: bool, message: str)."""
+    try:
+        data = json.loads(cookie_json_str)
+    except Exception as e:
+        return False, f"That doesn't look like valid JSON: {e}"
+
+    # normalize into Playwright's storage_state shape: {"cookies": [...], "origins": []}
+    if isinstance(data, list):
+        cookies = data
+    elif isinstance(data, dict) and "cookies" in data:
+        cookies = data["cookies"]
+    else:
+        return False, "Unrecognized format — expected a cookie array or a storage_state object with a 'cookies' key"
+
+    normalized = []
+    for c in cookies:
+        if "name" not in c or "value" not in c:
+            continue
+        normalized.append({
+            "name": c["name"],
+            "value": c["value"],
+            "domain": c.get("domain", ".x.com"),
+            "path": c.get("path", "/"),
+            "expires": c.get("expires", c.get("expirationDate", -1)) or -1,
+            "httpOnly": c.get("httpOnly", False),
+            "secure": c.get("secure", True),
+            "sameSite": c.get("sameSite", "Lax") if c.get("sameSite") in ("Strict", "Lax", "None") else "Lax",
+        })
+
+    if not normalized:
+        return False, "No usable cookies found in that data"
+
+    storage_state = {"cookies": normalized, "origins": []}
+    try:
+        with open(config.SESSION_STATE_PATH, "w") as f:
+            json.dump(storage_state, f)
+    except Exception as e:
+        return False, f"Could not save session file: {e}"
+
+    xb = get_browser()
+    if xb is None:
+        return True, "Session saved, but browser isn't ready yet to reload it — it'll be picked up on next restart"
+
+    try:
+        logged_in = submit_browser_task(xb.reload_session)
+    except Exception as e:
+        return False, f"Session saved but reload failed: {e}"
+
+    if logged_in:
+        storage.log_activity("Session imported successfully — now logged into X")
+        return True, f"Imported {len(normalized)} cookies and reloaded — now logged into X!"
+    else:
+        storage.log_activity("Session imported but still not logged in — cookies may be incomplete/expired")
+        return False, f"Imported {len(normalized)} cookies, but still not showing as logged in — the session may be missing key cookies or already expired"
 
 
 def fetch_url_for_chat(url: str) -> str:

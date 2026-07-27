@@ -71,6 +71,7 @@ class XBrowser:
             "locale": "en-US",
             "timezone_id": "America/New_York",
         }
+        self._context_kwargs = context_kwargs  # saved so reload_session() can reuse it
         try:
             self._context = self._browser.new_context(
                 storage_state=config.SESSION_STATE_PATH, **context_kwargs
@@ -111,6 +112,31 @@ class XBrowser:
             print(f"[browser] X login failed: {e}")
             self.logged_in = False
             return False
+
+    def reload_session(self) -> bool:
+        """Closes the current context and reopens one loaded from whatever is
+        currently saved at config.SESSION_STATE_PATH — used right after a session
+        is imported via the dashboard, so it takes effect immediately without
+        restarting the whole browser process. Returns whether it's now logged in."""
+        try:
+            if self._context:
+                self._context.close()
+        except Exception as e:
+            print(f"[browser] error closing old context during reload: {e}")
+
+        self._context = self._browser.new_context(
+            storage_state=config.SESSION_STATE_PATH, **self._context_kwargs
+        )
+        self._context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+        )
+        self._page = self._context.new_page()
+        self.logged_in = self._is_logged_in()
+        if self.logged_in:
+            print("[browser] session reload successful — now logged in")
+        else:
+            print("[browser] session reload completed but still not logged in — check the imported cookies")
+        return self.logged_in
 
     def stop(self):
         if self._context:

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reply Assistant</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="header">
+      <div class="header-top">
+        <h1>Reply Assistant</h1>
+        <button id="active-toggle" class="pill">
+          <span class="dot"></span>
+          <span id="active-label">Active</span>
+        </button>
+      </div>
+      <div class="stats">
+        <span><b id="stat-pending">0</b> waiting</span>
+        <span><b id="stat-posted">0</b> posted today</span>
+        <span><b id="stat-skipped">0</b> skipped</span>
+      </div>
+      <div id="x-login-warning" class="hidden" style="font-size:11.5px;color:#C0736B;padding-bottom:10px;">
+        Not logged into X yet — chat &amp; URL reading still work, but scanning/posting is paused.
+      </div>
+      <div class="tabs">
+        <button class="tab active" data-tab="feed">Feed</button>
+        <button class="tab" data-tab="chat">Chat</button>
+        <button class="tab" data-tab="session">Session</button>
+      </div>
+    </header>
+
+    <main id="feed-view">
+      <div id="feed-list"></div>
+    </main>
+
+    <main id="chat-view" class="hidden">
+      <div id="chat-messages"></div>
+      <div id="chat-input-row">
+        <input id="chat-input" type="text" placeholder="Tell it what to do, or ask about its activity..." />
+        <button id="chat-send">Send</button>
+      </div>
+    </main>
+
+    <main id="session-view" class="hidden">
+      <p style="font-size:13px;color:#8892A0;margin-bottom:10px;line-height:1.5;">
+        If automated login keeps getting blocked, log into your assistant account manually
+        in a real browser (e.g. Kiwi Browser on Android, which supports cookie-export
+        extensions like Cookie-Editor), then paste the exported cookie JSON below.
+      </p>
+      <textarea id="session-textarea" rows="10" placeholder='Paste cookie JSON here, e.g. [{"name":"auth_token","value":"...","domain":".x.com"}, ...]' style="width:100%;background:#161A20;border:1px solid #232A33;border-radius:12px;color:#EDEFF2;padding:10px;font-size:12.5px;font-family:monospace;"></textarea>
+      <button id="session-import-btn" style="margin-top:10px;width:100%;padding:12px;border-radius:12px;border:none;background:#E3A548;color:#171008;font-weight:600;font-size:13.5px;">Import Session</button>
+      <div id="session-result" style="margin-top:10px;font-size:13px;color:#8892A0;"></div>
+    </main>
+  </div>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

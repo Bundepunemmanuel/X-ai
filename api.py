@@ -117,6 +117,17 @@ def chat_history():
     return {"messages": storage.get_chat_history(50)}
 
 
+# ─── Session import (manual login workaround) ──────────────────────────────
+class SessionImportRequest(BaseModel):
+    session_json: str
+
+
+@router.post("/api/session/import")
+def import_session(body: SessionImportRequest):
+    success, message = agent.import_session(body.session_json)
+    return {"success": success, "message": message}
+
+
 # ─── Settings ────────────────────────────────────────────────────────────────
 class ActiveRequest(BaseModel):
     active: bool
