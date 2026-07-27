@@ -275,6 +275,18 @@ def get_browser():
     return _xb_instance
 
 
+def search_web_for_chat(query: str):
+    """Thread-safe wrapper api.py can call to run a real web search through the live browser."""
+    xb = get_browser()
+    if xb is None:
+        return []
+    try:
+        return submit_browser_task(xb.web_search, query)
+    except Exception as e:
+        print(f"[agent] search task failed: {e}")
+        return []
+
+
 def fetch_url_for_chat(url: str) -> str:
     """Thread-safe wrapper api.py can call to fetch a URL through the live browser session."""
     xb = get_browser()

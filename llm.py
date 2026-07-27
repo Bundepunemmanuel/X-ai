@@ -372,11 +372,44 @@ def _clean_chat_reply(text: str) -> str:
     return cleaned or text.strip()
 
 
+# ─── Chat panel: decide if a message needs a real web search first ─────────
+def decide_chat_search(user_message: str) -> dict:
+    """Returns {"needs_search": bool, "query": str or None}. Only fires for
+    requests that clearly need live/current info the model can't know from
+    training data alone (prices, current app rankings, live availability, etc.)."""
+    prompt = f"""Decide if answering this message truthfully requires a live web search,
+versus something you could answer from general knowledge or from the assistant's own
+activity log (which is provided separately, not here).
+
+Message: "{user_message}"
+
+Say needs_search=true for: current prices, live rankings/lists, real download/revenue
+numbers, "search X for Y", "find/check the latest...", anything requiring current data
+you cannot know for certain without looking it up right now.
+
+Say needs_search=false for: general knowledge questions, instructions/settings changes,
+questions about the assistant's own past activity, opinions, or anything not requiring
+live current data.
+
+Respond with ONLY JSON, no markdown:
+{{"needs_search": true or false, "query": "a short 3-6 word search query, or null"}}"""
+
+    raw = _call_gemini(prompt, temperature=0.2, max_tokens=200)
+    parsed = _parse_json(raw)
+    if not parsed:
+        return {"needs_search": False, "query": None}
+    return parsed
+
+
 # ─── Chat panel: answer questions about the assistant's own activity ───────
-def chat_respond(user_message: str, activity_context: str, chat_history: str = "", page_content: str = "") -> str:
+def chat_respond(user_message: str, activity_context: str, chat_history: str = "", page_content: str = "", search_results: str = "") -> str:
     url_context = ""
     if page_content:
         url_context = "They shared a URL. Here is the actual page content that was just fetched:\n" + page_content[:1200]
+
+    search_context = ""
+    if search_results:
+        search_context = "A live web search was just run for this request. Actual results:\n" + search_results[:1500]
 
     prompt = f"""You are the X reply assistant itself, talking directly to your operator in a
 dashboard chat panel. Be direct and concise, like a capable assistant giving a status update or
@@ -392,18 +425,24 @@ Operator's message: "{user_message}"
 
 {url_context}
 
-CRITICAL: You have no background task system and no memory beyond what's shown above. Never claim
-you're "scanning," "analyzing in the background," or "will update you when complete" — you can't do
-that. If a URL was shared and its content is included above, respond using that actual content right
-now. If fetching it failed, say so plainly instead of pretending you're working on it.
+{search_context}
 
-If they're asking about your activity, answer using the activity log above — don't make anything up.
-If they're giving you an instruction (e.g. change pacing, avoid a topic, prioritize something),
-acknowledge it clearly and specifically.
+CRITICAL RULES:
+- You have no background task system and no memory beyond what's shown above. Never claim
+  you're "scanning," "analyzing in the background," or "will update you when complete."
+- NEVER invent specific numbers, prices, revenue figures, download counts, or facts you don't
+  actually have. If real search results or fetched page content are provided above, use only
+  those specific facts. If nothing was provided and you don't genuinely know something as
+  established general knowledge, say plainly that you don't have real data for that rather
+  than generating a plausible-sounding guess.
+- If a search was run and results are shown above, answer using those actual results.
+- If they're asking about your activity, answer using the activity log above — don't make anything up.
+- If they're giving you an instruction (e.g. change pacing, avoid a topic, prioritize something),
+  acknowledge it clearly and specifically.
 
 STRICT LIMIT: under 50 words total, as plain sentences. No bullet points, no asterisks, no markdown
 of any kind — just plain conversational text."""
-    raw = _call_gemini(prompt, temperature=0.6, max_tokens=800)
+    raw = _call_gemini(prompt, temperature=0.5, max_tokens=800)
     if not raw:
         return "Sorry, I couldn't process that — try again?"
     return _clean_chat_reply(raw)

@@ -195,6 +195,37 @@ class XBrowser:
             print(f"[browser] could not read external link {url}: {e}")
             return ""
 
+    # ─── General web search (for chat: "search X for Y" style requests) ──
+    def web_search(self, query: str, max_results: int = 5):
+        """Runs a search on DuckDuckGo's HTML endpoint (no JS required, doesn't need
+        login, and is much more scrape-friendly than Google). Returns list of
+        {title, snippet, url}."""
+        try:
+            new_page = self._context.new_page()
+            search_url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
+            new_page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
+            time.sleep(1.5)
+
+            results = []
+            result_blocks = new_page.locator(".result")
+            count = min(result_blocks.count(), max_results)
+            for i in range(count):
+                block = result_blocks.nth(i)
+                title_el = block.locator(".result__title").first
+                snippet_el = block.locator(".result__snippet").first
+                link_el = block.locator(".result__url").first
+                title = title_el.inner_text() if title_el.count() else ""
+                snippet = snippet_el.inner_text() if snippet_el.count() else ""
+                url = link_el.inner_text() if link_el.count() else ""
+                if title:
+                    results.append({"title": title, "snippet": snippet, "url": url})
+
+            new_page.close()
+            return results
+        except Exception as e:
+            print(f"[browser] web search failed for '{query}': {e}")
+            return []
+
     # ─── Posting a reply ─────────────────────────────────────────────────
     def post_reply(self, thread_url: str, reply_text: str) -> bool:
         page = self._page

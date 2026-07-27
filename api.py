@@ -74,7 +74,21 @@ def chat(body: ChatRequest):
     if urls:
         page_content = agent.fetch_url_for_chat(urls[0])
 
-    reply = llm.chat_respond(body.message, activity_text, history_text, page_content)
+    # if no URL was given but the request needs live/current info (prices, rankings,
+    # "search X for Y", etc.), run a real search instead of letting the model guess.
+    search_results_text = ""
+    if not urls:
+        decision = llm.decide_chat_search(body.message)
+        if decision.get("needs_search") and decision.get("query"):
+            results = agent.search_web_for_chat(decision["query"])
+            if results:
+                search_results_text = "\n".join(
+                    f"- {r['title']}: {r['snippet']}" for r in results
+                )
+            else:
+                search_results_text = "(search ran but returned no usable results)"
+
+    reply = llm.chat_respond(body.message, activity_text, history_text, page_content, search_results_text)
     storage.add_chat_message("assistant", reply)
     return {"reply": reply}
 
