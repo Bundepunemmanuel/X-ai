@@ -13,7 +13,7 @@ import config
 
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-3.5-flash:generateContent"
+    "gemini-3.5-flash-lite:generateContent"
 )
 
 # ─── Voice presets (ported from reply.js) ──────────────────────────────────
@@ -372,32 +372,55 @@ def _clean_chat_reply(text: str) -> str:
     return cleaned or text.strip()
 
 
-# ─── Chat panel: decide if a message needs a real web search first ─────────
-def decide_chat_search(user_message: str) -> dict:
-    """Returns {"needs_search": bool, "query": str or None}. Only fires for
-    requests that clearly need live/current info the model can't know from
-    training data alone (prices, current app rankings, live availability, etc.)."""
-    prompt = f"""Decide if answering this message truthfully requires a live web search,
-versus something you could answer from general knowledge or from the assistant's own
-activity log (which is provided separately, not here).
+# ─── Chat panel: one combined call that decides + responds, to save quota ──
+def chat_turn(user_message: str, activity_context: str, chat_history: str = "", page_content: str = "") -> dict:
+    """Single Gemini call that both decides whether live search is needed AND,
+    if not, writes the actual reply — cutting the common case down from 2 calls
+    to 1. Returns {"needs_search": bool, "query": str or None, "reply": str or None}.
+    If needs_search is true, reply will be None and the caller must run a search
+    and then call chat_respond_with_results() for a second, final call."""
+    url_context = ""
+    if page_content:
+        url_context = "They shared a URL. Here is the actual page content that was just fetched:\n" + page_content[:1200]
 
-Message: "{user_message}"
+    prompt = f"""You are the X reply assistant itself, talking directly to your operator in a
+dashboard chat panel. Be direct and concise — a capable assistant giving a status update or
+taking an instruction, not a generic chatbot.
 
-Say needs_search=true for: current prices, live rankings/lists, real download/revenue
-numbers, "search X for Y", "find/check the latest...", anything requiring current data
-you cannot know for certain without looking it up right now.
+Your recent activity:
+{activity_context}
 
-Say needs_search=false for: general knowledge questions, instructions/settings changes,
-questions about the assistant's own past activity, opinions, or anything not requiring
-live current data.
+Recent conversation:
+{chat_history}
+
+Operator's message: "{user_message}"
+
+{url_context}
+
+First decide: does answering this truthfully require a LIVE web search (current prices, live
+rankings, real download/revenue numbers, "search X for Y", anything needing current data you
+can't know for certain)? If a URL's content is already provided above, that counts as already
+having the data you need — no search required for that.
+
+If NO search is needed, write the actual reply now, following these rules:
+- Never invent specific numbers, prices, or facts you don't actually have. If you don't
+  genuinely know something as established fact, say so plainly instead of guessing.
+- If they're asking about your activity, use only the activity log above.
+- If page content was provided above, answer using those actual facts.
+- Never claim you're "scanning in the background" — you have no such capability.
+- Under 50 words, plain sentences, no bullets/asterisks/markdown.
+
+If search IS needed, leave reply as null — do not guess an answer.
 
 Respond with ONLY JSON, no markdown:
-{{"needs_search": true or false, "query": "a short 3-6 word search query, or null"}}"""
+{{"needs_search": true or false, "query": "short 3-6 word search query or null", "reply": "the reply text, or null if search is needed"}}"""
 
-    raw = _call_gemini(prompt, temperature=0.2, max_tokens=200)
+    raw = _call_gemini(prompt, temperature=0.5, max_tokens=800)
     parsed = _parse_json(raw)
     if not parsed:
-        return {"needs_search": False, "query": None}
+        return {"needs_search": False, "query": None, "reply": "Sorry, I couldn't process that — try again?"}
+    if parsed.get("reply"):
+        parsed["reply"] = _clean_chat_reply(parsed["reply"])
     return parsed
 
 

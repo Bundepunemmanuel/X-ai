@@ -87,7 +87,7 @@ def scan_and_draft(xb: XBrowser):
 
     query = random.choice(SEARCH_QUERIES)
     print(f"[agent] scanning: {query}")
-    candidates = xb.search_recent_posts(query, max_results=10)
+    candidates = xb.search_recent_posts(query, max_results=5)  # kept small to limit Gemini calls per cycle
 
     for post in candidates:
         if storage.has_seen_thread(post["url"]):
@@ -105,6 +105,7 @@ def scan_and_draft(xb: XBrowser):
         classification = llm.classify_thread(
             thread["post_text"] or post["text"], existing_replies_text, commenter_page_content
         )
+        time.sleep(5)  # space out Gemini calls so a burst of candidates doesn't trip the RPM ceiling
 
         if classification["action"] == "skip":
             print(f"[agent] skipping {post['url']}: {classification['reasoning']}")
@@ -120,6 +121,7 @@ def scan_and_draft(xb: XBrowser):
             existing_replies_text,
             classification.get("pain_quote"),
         )
+        time.sleep(5)  # same spacing after the drafting call
 
         if not draft_text:
             print(f"[agent] empty draft for {post['url']}, skipping")
@@ -209,6 +211,7 @@ def check_notifications(xb: XBrowser):
             conversation_history="(original exchange context not retained across sessions yet)",
             their_last_message=m["text"],
         )
+        time.sleep(5)
 
         if result["needs_human"]:
             storage.add_draft(
@@ -239,6 +242,7 @@ def check_notifications(xb: XBrowser):
         result = llm.draft_followup_reply(
             conversation_history="(DM thread)", their_last_message=dm["last_message"],
         )
+        time.sleep(5)
         if result["needs_human"] or result["status"] == "closed" or not result["reply"]:
             if result["needs_human"]:
                 storage.log_activity("Flagged for you: a DM needs a human response")
