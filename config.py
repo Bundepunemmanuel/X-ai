@@ -39,7 +39,6 @@ AUTO_POST_APPROVAL_THRESHOLD = int(os.environ.get("AUTO_POST_APPROVAL_THRESHOLD"
 # ─── Storage ──────────────────────────────────────────────────────────────
 DB_PATH = os.environ.get("DB_PATH", "assistant.db")
 SESSION_STATE_PATH = os.environ.get("SESSION_STATE_PATH", "x_session_state.json")
-SESSION_STATE_PATH = os.environ.get("SESSION_STATE_PATH", "x_session_state.json")
 X_SESSION_JSON = os.environ.get("X_SESSION_JSON", "")
 
 # ─── Misc ─────────────────────────────────────────────────────────────────
