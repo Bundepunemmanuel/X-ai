@@ -124,8 +124,8 @@ class SessionImportRequest(BaseModel):
 
 @router.post("/api/session/import")
 def import_session(body: SessionImportRequest):
-    success, message = agent.import_session(body.session_json)
-    return {"success": success, "message": message}
+    success, message, session_json = agent.import_session(body.session_json)
+    return {"success": success, "message": message, "session_json": session_json}
 
 
 # ─── Settings ────────────────────────────────────────────────────────────────
