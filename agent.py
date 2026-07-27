@@ -341,15 +341,37 @@ def like_url_for_chat(url: str):
         return False, str(e)
 
 
+def _map_same_site(raw_value) -> str:
+    """Cookie-Editor exports sameSite as lowercase strings like 'lax', 'strict',
+    'no_restriction', 'unspecified', or null — none of which match Playwright's
+    expected 'Strict'/'Lax'/'None' directly. This maps them properly instead of
+    silently defaulting everything to 'Lax'."""
+    if not raw_value:
+        return "Lax"
+    v = str(raw_value).strip().lower()
+    if v in ("no_restriction", "none"):
+        return "None"
+    if v == "strict":
+        return "Strict"
+    if v == "lax":
+        return "Lax"
+    return "Lax"  # unspecified or anything unrecognized — Lax is the safe default
+
+
+# critical cookies X's auth actually depends on — used for verbose diagnostics only
+CRITICAL_COOKIE_NAMES = {"auth_token", "ct0", "gt", "twid"}
+
+
 def import_session(cookie_json_str: str):
     """Accepts pasted cookie data (either a bare array of cookie objects, like what
     Cookie-Editor exports, or a full Playwright storage_state object) and writes it
     to the session file in the format Playwright expects, then reloads the live
-    browser session immediately. Returns (success: bool, message: str)."""
+    browser session immediately. Returns (success: bool, message: str, session_json: str or None)."""
     try:
         data = json.loads(cookie_json_str)
     except Exception as e:
-        return False, f"That doesn't look like valid JSON: {e}"
+        print(f"[agent] session import: invalid JSON — {e}")
+        return False, f"That doesn't look like valid JSON: {e}", None
 
     # normalize into Playwright's storage_state shape: {"cookies": [...], "origins": []}
     if isinstance(data, list):
@@ -357,48 +379,75 @@ def import_session(cookie_json_str: str):
     elif isinstance(data, dict) and "cookies" in data:
         cookies = data["cookies"]
     else:
-        return False, "Unrecognized format — expected a cookie array or a storage_state object with a 'cookies' key"
+        print("[agent] session import: unrecognized top-level format")
+        return False, "Unrecognized format — expected a cookie array or a storage_state object with a 'cookies' key", None
+
+    print(f"[agent] session import: received {len(cookies)} raw cookie entries")
 
     normalized = []
+    x_domain_count = 0
     for c in cookies:
         if "name" not in c or "value" not in c:
             continue
+        domain = c.get("domain", ".x.com")
+        if "x.com" in domain:
+            x_domain_count += 1
+        mapped_same_site = _map_same_site(c.get("sameSite"))
+        # Playwright/Chromium reject sameSite=None on a non-secure cookie
+        secure = c.get("secure", True)
+        if mapped_same_site == "None" and not secure:
+            mapped_same_site = "Lax"
         normalized.append({
             "name": c["name"],
             "value": c["value"],
-            "domain": c.get("domain", ".x.com"),
+            "domain": domain,
             "path": c.get("path", "/"),
             "expires": c.get("expires", c.get("expirationDate", -1)) or -1,
             "httpOnly": c.get("httpOnly", False),
-            "secure": c.get("secure", True),
-            "sameSite": c.get("sameSite", "Lax") if c.get("sameSite") in ("Strict", "Lax", "None") else "Lax",
+            "secure": secure,
+            "sameSite": mapped_same_site,
         })
 
     if not normalized:
-        return False, "No usable cookies found in that data"
+        print("[agent] session import: no usable cookies after filtering")
+        return False, "No usable cookies found in that data", None
+
+    print(f"[agent] session import: {x_domain_count} cookies scoped to x.com out of {len(normalized)} total")
+    found_critical = {c["name"] for c in normalized if c["name"] in CRITICAL_COOKIE_NAMES}
+    missing_critical = CRITICAL_COOKIE_NAMES - found_critical
+    print(f"[agent] session import: critical auth cookies found={sorted(found_critical)} missing={sorted(missing_critical)}")
+    if missing_critical:
+        print(f"[agent] session import WARNING: missing {sorted(missing_critical)} — login will likely fail without these")
 
     storage_state = {"cookies": normalized, "origins": []}
+    storage_state_json = json.dumps(storage_state)
     try:
         with open(config.SESSION_STATE_PATH, "w") as f:
-            json.dump(storage_state, f)
+            f.write(storage_state_json)
+        print(f"[agent] session import: wrote {len(normalized)} cookies to {config.SESSION_STATE_PATH}")
     except Exception as e:
-        return False, f"Could not save session file: {e}"
+        print(f"[agent] session import: failed to write session file — {e}")
+        return False, f"Could not save session file: {e}", None
 
     xb = get_browser()
     if xb is None:
-        return True, "Session saved, but browser isn't ready yet to reload it — it'll be picked up on next restart"
+        print("[agent] session import: browser not ready yet, session will load on next start")
+        return True, "Session saved, but browser isn't ready yet to reload it — it'll be picked up on next restart", storage_state_json
 
+    print("[agent] session import: reloading live browser session now")
     try:
         logged_in = submit_browser_task(xb.reload_session)
     except Exception as e:
-        return False, f"Session saved but reload failed: {e}"
+        print(f"[agent] session import: reload_session task failed — {e}")
+        return False, f"Session saved but reload failed: {e}", storage_state_json
 
+    print(f"[agent] session import: post-reload login check result = {logged_in}")
     if logged_in:
         storage.log_activity("Session imported successfully — now logged into X")
-        return True, f"Imported {len(normalized)} cookies and reloaded — now logged into X!"
+        return True, f"Imported {len(normalized)} cookies and reloaded — now logged into X! Copy the JSON below into an X_SESSION_JSON env var on Render so this survives redeploys.", storage_state_json
     else:
         storage.log_activity("Session imported but still not logged in — cookies may be incomplete/expired")
-        return False, f"Imported {len(normalized)} cookies, but still not showing as logged in — the session may be missing key cookies or already expired"
+        return False, f"Imported {len(normalized)} cookies, but still not showing as logged in — the session may be missing key cookies or already expired", storage_state_json
 
 
 def fetch_url_for_chat(url: str) -> str:

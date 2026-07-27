@@ -50,6 +50,19 @@ class XBrowser:
 
     def start(self):
         self._playwright = sync_playwright().start()
+
+        # if a session was saved as an env var (to survive Render's ephemeral disk
+        # across redeploys), write it to the expected file path before anything
+        # else tries to load it — this only happens if no local file already exists,
+        # so it doesn't clobber a fresher session written by an in-app import.
+        if config.X_SESSION_JSON and not os.path.exists(config.SESSION_STATE_PATH):
+            try:
+                with open(config.SESSION_STATE_PATH, "w") as f:
+                    f.write(config.X_SESSION_JSON)
+                print("[browser] wrote session from X_SESSION_JSON env var (surviving redeploy)")
+            except Exception as e:
+                print(f"[browser] could not write session from env var: {e}")
+
         self._browser = self._playwright.chromium.launch(
             headless=config.HEADLESS,
             args=[
@@ -368,8 +381,27 @@ class XBrowser:
             return []
 
     # ─── Liking a post (simplest possible way to verify login works for real) ─
+    def _check_still_logged_in_after_failure(self, page):
+        """Called when an action (like/reply/post) fails, to distinguish 'X logged us
+        out mid-session' from some other transient failure. If the page is showing a
+        logged-out view, flips self.logged_in so the retry loop picks it back up,
+        instead of the app silently continuing to assume it's still authenticated."""
+        try:
+            url = page.url
+            if "login" in url or "logout" in url or "flow" in url:
+                print("[browser] detected logged-out URL after action failure — session likely invalidated")
+                self.logged_in = False
+                return
+            # also check for the logged-out page's signup sidebar as a fallback signal
+            if page.locator("text=Sign up with Google").count() > 0 or page.locator("text=New to X?").count() > 0:
+                print("[browser] detected logged-out page content after action failure — session likely invalidated")
+                self.logged_in = False
+        except Exception as e:
+            print(f"[browser] could not verify login state after failure: {e}")
+
     def like_post(self, thread_url: str) -> bool:
         page = self._page
+        print(f"[browser] attempting to like {thread_url}")
         try:
             page.goto(thread_url, wait_until="domcontentloaded")
             time.sleep(2)
@@ -383,11 +415,13 @@ class XBrowser:
             print(f"[browser] failed to like {thread_url}: {e}")
             self.last_error = f"Failed to like post: {e}"
             _save_debug_screenshot(page, "like_post")
+            self._check_still_logged_in_after_failure(page)
             return False
 
     # ─── Posting a reply ─────────────────────────────────────────────────
     def post_reply(self, thread_url: str, reply_text: str) -> bool:
         page = self._page
+        print(f"[browser] attempting to post reply to {thread_url}")
         try:
             page.goto(thread_url, wait_until="domcontentloaded")
             time.sleep(2)
@@ -400,15 +434,18 @@ class XBrowser:
             send_button = page.locator('[data-testid="tweetButton"]').first
             send_button.click()
             time.sleep(2)
+            print(f"[browser] posted reply to {thread_url}")
             return True
         except Exception as e:
             print(f"[browser] failed to post reply to {thread_url}: {e}")
             _save_debug_screenshot(page, "post_reply")
+            self._check_still_logged_in_after_failure(page)
             return False
 
     # ─── Posting an original post ────────────────────────────────────────
     def post_original(self, text: str) -> bool:
         page = self._page
+        print("[browser] attempting to post an original post")
 
         # primary path: dedicated compose URL
         try:
@@ -449,6 +486,7 @@ class XBrowser:
             print(f"[browser] home feed compose fallback also failed: {e}")
             self.last_error = f"Both compose paths failed to post original post: {e}"
             _save_debug_screenshot(page, "compose_post_fallback")
+            self._check_still_logged_in_after_failure(page)
             return False
 
     # ─── Notifications / mentions (replies to the assistant's own posts) ─
@@ -513,6 +551,7 @@ class XBrowser:
 
     def send_dm(self, conversation_url: str, text: str) -> bool:
         page = self._page
+        print(f"[browser] attempting to send DM in {conversation_url}")
         try:
             page.goto(conversation_url, wait_until="domcontentloaded")
             time.sleep(2)
@@ -522,9 +561,11 @@ class XBrowser:
             time.sleep(1)
             page.locator('[data-testid="dmComposerSendButton"]').first.click()
             time.sleep(1)
+            print(f"[browser] sent DM in {conversation_url}")
             return True
         except Exception as e:
             print(f"[browser] failed to send DM: {e}")
+            self._check_still_logged_in_after_failure(page)
             return False
 
 
