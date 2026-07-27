@@ -207,8 +207,9 @@ def approve_draft(xb: XBrowser, draft_id: int, edited_text: str = None):
         return False, error_msg
 
     if not success:
-        storage.log_activity(f"Failed to post ({draft_type}) for {draft['author_handle']}")
-        return False, "Post action returned failure — check Render logs for details"
+        real_reason = xb.last_error or "no specific reason captured — check Render logs"
+        storage.log_activity(f"Failed to post ({draft_type}) for {draft['author_handle']}: {real_reason}")
+        return False, real_reason
 
     storage.update_draft_status(draft_id, "approved", draft_text=text_to_post)
     storage.mark_draft_posted(draft_id)

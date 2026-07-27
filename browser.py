@@ -29,6 +29,7 @@ class XBrowser:
         self._context = None
         self._page = None
         self.logged_in = False
+        self.last_error = None
 
     def start(self):
         self._playwright = sync_playwright().start()
@@ -249,18 +250,44 @@ class XBrowser:
     # ─── Posting an original post ────────────────────────────────────────
     def post_original(self, text: str) -> bool:
         page = self._page
+
+        # primary path: dedicated compose URL
         try:
             page.goto(f"{BASE_URL}/compose/post", wait_until="domcontentloaded")
-            time.sleep(2)
             box = page.locator('[data-testid="tweetTextarea_0"]').first
+            box.wait_for(state="visible", timeout=15000)
             box.click()
             box.fill(text)
             time.sleep(1)
             page.locator('[data-testid="tweetButton"]').first.click()
             time.sleep(2)
+            print("[browser] posted original via /compose/post")
             return True
         except Exception as e:
-            print(f"[browser] failed to post original: {e}")
+            print(f"[browser] /compose/post path failed ({e}), trying home feed compose button fallback")
+
+        # fallback: go to home feed and click the "New post" button to open the composer,
+        # since X's dedicated compose URL doesn't always render reliably
+        try:
+            page.goto(f"{BASE_URL}/home", wait_until="domcontentloaded")
+            time.sleep(2)
+            new_post_button = page.locator('[data-testid="SideNav_NewTweet_Button"]').first
+            new_post_button.wait_for(state="visible", timeout=15000)
+            new_post_button.click()
+            time.sleep(1.5)
+
+            box = page.locator('[data-testid="tweetTextarea_0"]').first
+            box.wait_for(state="visible", timeout=15000)
+            box.click()
+            box.fill(text)
+            time.sleep(1)
+            page.locator('[data-testid="tweetButton"]').first.click()
+            time.sleep(2)
+            print("[browser] posted original via home feed compose button")
+            return True
+        except Exception as e:
+            print(f"[browser] home feed compose fallback also failed: {e}")
+            self.last_error = f"Both compose paths failed to post original post: {e}"
             return False
 
     # ─── Notifications / mentions (replies to the assistant's own posts) ─

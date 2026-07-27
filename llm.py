@@ -405,6 +405,10 @@ having the data you need — no search required for that.
 If NO search is needed, write the actual reply now, following these rules:
 - Never invent specific numbers, prices, or facts you don't actually have. If you don't
   genuinely know something as established fact, say so plainly instead of guessing.
+- Never invent technical explanations for delays, failures, or "what you're doing right now"
+  — no "browser loop issues," "resetting the connection," or similar, unless those exact words
+  appear in the activity log above. If nothing relevant is logged, say you don't have a
+  specific reason logged rather than inventing a technical-sounding one.
 - If they're asking about your activity, use only the activity log above.
 - If page content was provided above, answer using those actual facts.
 - Never claim you're "scanning in the background" — you have no such capability.
@@ -458,6 +462,11 @@ CRITICAL RULES:
   those specific facts. If nothing was provided and you don't genuinely know something as
   established general knowledge, say plainly that you don't have real data for that rather
   than generating a plausible-sounding guess.
+- NEVER invent technical explanations for delays, failures, or what you're "doing right now"
+  — no "browser loop issues," "resetting the connection," "clearing the queue," or similar
+  unless those exact words appear in the activity log above. If the activity log shows a
+  specific failure reason, state that reason plainly. If it shows nothing relevant, say you
+  don't have a specific reason logged rather than inventing a technical-sounding one.
 - If a search was run and results are shown above, answer using those actual results.
 - If they're asking about your activity, answer using the activity log above — don't make anything up.
 - If they're giving you an instruction (e.g. change pacing, avoid a topic, prioritize something),
