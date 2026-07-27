@@ -119,25 +119,34 @@ class XBrowser:
         time.sleep(2)
 
         # username step
-        page.fill('input[autocomplete="username"]', config.X_USERNAME)
+        try:
+            username_field = page.locator('input[autocomplete="username"]').first
+            username_field.wait_for(state="visible", timeout=15000)
+        except Exception as e:
+            _save_debug_screenshot(page, "login_username_field_missing")
+            raise RuntimeError(f"Username field never appeared on login page: {e}")
+
+        username_field.fill(config.X_USERNAME)
         page.keyboard.press("Enter")
         time.sleep(2)
 
         # X sometimes asks for a second identity check (phone/email) before password
         # if it thinks the login looks unusual — handle the common case where it doesn't.
         try:
-            page.wait_for_selector('input[name="password"]', timeout=5000)
+            page.wait_for_selector('input[name="password"]', timeout=8000)
         except Exception:
+            _save_debug_screenshot(page, "login_unexpected_checkpoint")
             print("[browser] unexpected extra verification step — manual login may be required")
-            raise RuntimeError("X login requires manual verification step (unexpected checkpoint)")
+            raise RuntimeError("X login requires manual verification step (unexpected checkpoint) — check /api/debug/screenshot")
 
         page.fill('input[name="password"]', config.X_PASSWORD)
         page.keyboard.press("Enter")
         time.sleep(3)
 
         if not self._is_logged_in():
+            _save_debug_screenshot(page, "login_final_check_failed")
             raise RuntimeError(
-                "X login failed — check credentials, or a 2FA/verification step is blocking automated login"
+                "X login failed — check credentials, or a 2FA/verification step is blocking automated login (see /api/debug/screenshot)"
             )
 
         self._context.storage_state(path=config.SESSION_STATE_PATH)
