@@ -5,10 +5,6 @@ services:
     plan: free
     dockerfilePath: ./Dockerfile
     envVars:
-      - key: X_USERNAME
-        sync: false
-      - key: X_PASSWORD
-        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: PRODUCT_NAME
