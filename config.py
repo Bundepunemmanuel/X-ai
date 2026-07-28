@@ -5,9 +5,6 @@ Nothing else in the project should call os.environ directly; import from here in
 
 import os
 
-# ─── Credentials ─────────────────────────────────────────────────────────
-X_USERNAME = os.environ.get("X_USERNAME", "")
-X_PASSWORD = os.environ.get("X_PASSWORD", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # ─── Product info (used in reply prompts) ────────────────────────────────
@@ -20,26 +17,18 @@ PRODUCT_DESCRIPTION = os.environ.get(
     "have to manually dig through Reddit looking for their next user.",
 )
 
-# ─── Pacing ───────────────────────────────────────────────────────────────
+# ─── Pacing (soft review-surfacing limits, not hard technical caps) ──────
 MIN_REPLIES_PER_DAY = int(os.environ.get("MIN_REPLIES_PER_DAY", 10))
 MAX_REPLIES_PER_DAY = int(os.environ.get("MAX_REPLIES_PER_DAY", 30))
-MAX_REPLIES_PER_30MIN = int(os.environ.get("MAX_REPLIES_PER_30MIN", 15))  # hard safety ceiling only
+MAX_REPLIES_PER_30MIN = int(os.environ.get("MAX_REPLIES_PER_30MIN", 15))
 MAX_ORIGINAL_POSTS_PER_DAY = int(os.environ.get("MAX_ORIGINAL_POSTS_PER_DAY", 1))
-MIN_GAP_SECONDS = int(os.environ.get("MIN_GAP_SECONDS", 60))       # jittered gap lower bound
-MAX_GAP_SECONDS = int(os.environ.get("MAX_GAP_SECONDS", 8 * 60))    # jittered gap upper bound, weighted toward higher end
+MIN_GAP_SECONDS = int(os.environ.get("MIN_GAP_SECONDS", 60))
+MAX_GAP_SECONDS = int(os.environ.get("MAX_GAP_SECONDS", 8 * 60))
 
-# how often the background loop wakes up to scan for new threads
 SCAN_INTERVAL_SECONDS = int(os.environ.get("SCAN_INTERVAL_SECONDS", 20 * 60))
-# how often it checks its own notifications/DMs
-NOTIFICATION_CHECK_INTERVAL_SECONDS = int(os.environ.get("NOTIFICATION_CHECK_INTERVAL_SECONDS", 15 * 60))
-
-# number of approved drafts of a given style before auto-post unlocks for that style
-AUTO_POST_APPROVAL_THRESHOLD = int(os.environ.get("AUTO_POST_APPROVAL_THRESHOLD", 5))
 
 # ─── Storage ──────────────────────────────────────────────────────────────
 DB_PATH = os.environ.get("DB_PATH", "assistant.db")
-SESSION_STATE_PATH = os.environ.get("SESSION_STATE_PATH", "x_session_state.json")
-X_SESSION_JSON = os.environ.get("X_SESSION_JSON", "")
 
 # ─── Misc ─────────────────────────────────────────────────────────────────
 HEADLESS = os.environ.get("HEADLESS", "true").lower() != "false"
@@ -47,11 +36,6 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 
 
 def validate():
-    """Call at startup — fail loudly for what's truly required to run at all.
-    X credentials are checked separately (see browser.try_login) since the
-    browser/chat's URL-reading should still work without them."""
+    """Call at startup — fail loudly for what's truly required to run at all."""
     if not GEMINI_API_KEY:
         raise RuntimeError("Missing required environment variable: GEMINI_API_KEY")
-    if not X_USERNAME or not X_PASSWORD:
-        print("[config] X_USERNAME/X_PASSWORD not set — X scanning/posting will be "
-              "disabled until these are added, but the rest of the app will still run.")

@@ -1,6 +1,8 @@
 """
-api.py — all dashboard-facing HTTP endpoints, mounted onto the FastAPI app in main.py.
-Talks to storage.py for data and agent.py for actions that need the live browser.
+api.py — dashboard-facing HTTP endpoints. Talks to storage.py for data and
+agent.py for browser-backed reads (URL fetch, search) and intent-link building.
+Note: "approve" no longer posts anything server-side — it returns a tap-to-send
+X link for the operator's phone to open and confirm.
 """
 
 import re
@@ -22,12 +24,10 @@ URL_PATTERN = re.compile(r"https?://\S+")
 def get_feed():
     drafts = storage.get_pending_drafts()
     counts = storage.get_today_counts()
-    xb = agent.get_browser()
     return {
         "drafts": drafts,
         "counts": counts,
         "active": storage.is_active(),
-        "x_logged_in": bool(xb and xb.logged_in),
         "recent_activity": storage.get_recent_activity(10),
     }
 
@@ -38,11 +38,8 @@ class ApproveRequest(BaseModel):
 
 @router.post("/api/drafts/{draft_id}/approve")
 def approve(draft_id: int, body: ApproveRequest):
-    xb = agent.get_browser()
-    if xb is None:
-        return {"success": False, "error": "browser not ready yet, try again shortly"}
-    success, error = agent.approve_draft(xb, draft_id, edited_text=body.edited_text)
-    return {"success": success, "error": error}
+    success, error, intent_url = agent.approve_draft(draft_id, edited_text=body.edited_text)
+    return {"success": success, "error": error, "intent_url": intent_url}
 
 
 @router.post("/api/drafts/{draft_id}/skip")
@@ -60,41 +57,34 @@ class ChatRequest(BaseModel):
 def chat(body: ChatRequest):
     storage.add_chat_message("user", body.message)
 
-    # direct, verifiable action: "like <url>" — bypasses the LLM entirely for the
-    # confirmation, since this is exactly the kind of "prove it's real" action that
-    # should never be answered by a guess. It shows up on the actual X account.
+    # direct, verifiable action: "like <url>" — returns a tap-to-like link,
+    # bypassing the LLM entirely so there's no chance of a false claim.
     urls = URL_PATTERN.findall(body.message)
     if urls and re.search(r"\blike\b", body.message, re.I):
-        success, error = agent.like_url_for_chat(urls[0])
-        if success:
-            reply = f"Done — liked {urls[0]}. Check your X account's Likes tab to confirm."
-            storage.log_activity(f"Liked a post via chat command: {urls[0]}")
+        intent_url = agent.like_intent_for_chat(urls[0])
+        if intent_url:
+            reply = f"Tap this to like it: {intent_url}"
+            storage.log_activity(f"Provided like link via chat: {urls[0]}")
         else:
-            reply = f"Couldn't like that post: {error}"
-            storage.log_activity(f"Failed to like {urls[0]} via chat: {error}")
+            reply = "Couldn't find a valid post ID in that link."
         storage.add_chat_message("assistant", reply)
         return {"reply": reply}
 
     activity = storage.get_recent_activity(15)
     activity_text = "\n".join(f"- {a['message']}" for a in activity) or "No activity yet."
-
-    xb = agent.get_browser()
-    login_status = "Currently logged into X and active." if (xb and xb.logged_in) else "Not currently logged into X — scanning/posting is paused, only chat and URL-reading work."
-    activity_text = f"X login status: {login_status}\n\n{activity_text}"
+    activity_text = (
+        "Mode: read-only browsing (search, reading posts, chat) is fully automatic. "
+        "Posting/replying/liking require opening a link on your phone and tapping "
+        "X's own send button — no server-side login is used.\n\n" + activity_text
+    )
 
     history = storage.get_chat_history(10)
     history_text = "\n".join(f"{h['role']}: {h['content']}" for h in history)
 
-    # if the message contains a URL, actually fetch it now (synchronously) rather
-    # than letting the model claim it's "scanning in the background" — it has no
-    # background task system, so that would be a hallucinated capability.
     page_content = ""
-    urls = URL_PATTERN.findall(body.message)
     if urls:
         page_content = agent.fetch_url_for_chat(urls[0])
 
-    # single combined call: decides if search is needed AND writes the reply if not,
-    # keeping the common case down to 1 Gemini call instead of 2.
     turn = llm.chat_turn(body.message, activity_text, history_text, page_content)
 
     if turn.get("reply"):
@@ -108,6 +98,7 @@ def chat(body: ChatRequest):
         reply = llm.chat_respond(body.message, activity_text, history_text, page_content, search_results_text)
     else:
         reply = "Sorry, I couldn't process that — try again?"
+
     storage.add_chat_message("assistant", reply)
     return {"reply": reply}
 
@@ -115,17 +106,6 @@ def chat(body: ChatRequest):
 @router.get("/api/chat/history")
 def chat_history():
     return {"messages": storage.get_chat_history(50)}
-
-
-# ─── Session import (manual login workaround) ──────────────────────────────
-class SessionImportRequest(BaseModel):
-    session_json: str
-
-
-@router.post("/api/session/import")
-def import_session(body: SessionImportRequest):
-    success, message, session_json = agent.import_session(body.session_json)
-    return {"success": success, "message": message, "session_json": session_json}
 
 
 # ─── Settings ────────────────────────────────────────────────────────────────
@@ -137,8 +117,3 @@ class ActiveRequest(BaseModel):
 def set_active(body: ActiveRequest):
     storage.set_setting("active", "1" if body.active else "0")
     return {"active": body.active}
-
-
-@router.get("/api/settings/style-trust")
-def style_trust():
-    return {"styles": storage.get_style_trust()}

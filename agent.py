@@ -1,28 +1,28 @@
 """
-agent.py — the main background loop: scan for threads, classify, draft,
-queue for approval (or auto-post if trusted), respect pacing caps.
-Runs continuously in a background thread started by main.py.
+agent.py — main background loop: scan threads (read-only), classify, draft,
+queue for review. "Approving" a draft no longer posts server-side — it
+generates an X "intent" link (a URL that opens X with the action pre-filled)
+for the operator to open on their own phone and confirm with one tap, since
+that's the only step that ever needed a real, trusted login.
 
 THREADING NOTE: Playwright's sync API is not safe to call from multiple threads.
-The XBrowser instance lives entirely inside the background loop's thread. Any other
-thread (like FastAPI's request handlers in api.py) that needs the browser to do
-something must go through submit_browser_task() below, which queues the work and
-lets the loop's own thread execute it, rather than touching Playwright directly.
+The XBrowser instance lives entirely inside the background loop's thread. Any
+other thread (like FastAPI's request handlers in api.py) that needs the browser
+to do something must go through submit_browser_task() below.
 """
 
 import time
 import threading
 import queue
 import random
-import json
+import re
+from urllib.parse import quote
 
 import config
 import storage
 import llm
 from browser import XBrowser, jittered_delay
 
-# "build in public" style search queries — threads where dropping a project
-# link is genuinely on-topic, not random hijacking.
 SEARCH_QUERIES = [
     "\"drop your project\"",
     "\"what are you building\"",
@@ -32,12 +32,16 @@ SEARCH_QUERIES = [
 ]
 
 _task_queue = queue.Queue()
+_xb_instance = None
+
+
+def get_browser():
+    return _xb_instance
 
 
 def submit_browser_task(fn, *args, timeout=90, **kwargs):
-    """Call from any thread other than the agent loop's own thread. Queues fn(*args, **kwargs)
-    to run inside the browser thread, blocks until it completes, and returns its result
-    (or raises whatever exception it raised)."""
+    """Call from any thread other than the agent loop's own thread. Queues fn(*args)
+    to run inside the browser thread, blocks until it completes, and returns its result."""
     result_holder = {}
     done_event = threading.Event()
 
@@ -57,7 +61,35 @@ def submit_browser_task(fn, *args, timeout=90, **kwargs):
     return result_holder.get("value")
 
 
-def _can_post_reply_now() -> bool:
+# ─── Tap-to-send intent link builders (no login needed, no code posts anything) ─
+def _extract_status_id(thread_url: str):
+    match = re.search(r"/status/(\d+)", thread_url or "")
+    return match.group(1) if match else None
+
+
+def build_reply_intent_url(thread_url: str, text: str) -> str:
+    status_id = _extract_status_id(thread_url)
+    if not status_id:
+        return None
+    return f"https://x.com/intent/tweet?in_reply_to={status_id}&text={quote(text)}"
+
+
+def build_like_intent_url(thread_url: str) -> str:
+    status_id = _extract_status_id(thread_url)
+    if not status_id:
+        return None
+    return f"https://x.com/intent/like?tweet_id={status_id}"
+
+
+def build_post_intent_url(text: str) -> str:
+    return f"https://x.com/intent/tweet?text={quote(text)}"
+
+
+# ─── Pacing ──────────────────────────────────────────────────────────────
+def _can_review_reply_now() -> bool:
+    """Soft pacing guidance — since actual sending now happens on the operator's
+    own phone (outside our control), this just limits how many drafts we surface
+    for review at once, not a hard technical cap."""
     if storage.replies_in_last_30_min() >= config.MAX_REPLIES_PER_30MIN:
         return False
     counts = storage.get_today_counts()
@@ -66,29 +98,25 @@ def _can_post_reply_now() -> bool:
     return True
 
 
-def _can_post_mention_today() -> bool:
+def _can_review_mention_today() -> bool:
     counts = storage.get_today_counts()
-    return counts.get("mentions_posted", 0) < 5  # soft ceiling on Kairo mentions specifically
+    return counts.get("mentions_posted", 0) < 5
 
 
-def _can_post_original_today() -> bool:
+def _can_review_original_today() -> bool:
     counts = storage.get_today_counts()
     return counts["original_posts_posted"] < config.MAX_ORIGINAL_POSTS_PER_DAY
 
 
-def _style_key_for(draft_type: str) -> str:
-    return draft_type  # 'question' or 'mention' — kept simple, could get more granular later
-
-
 def scan_and_draft(xb: XBrowser):
-    """One scan cycle: search for candidate threads, classify, draft, queue."""
+    """One scan cycle: search for candidate threads, classify, draft, queue for review."""
     if not storage.is_active():
         print("[agent] paused, skipping scan")
         return
 
     query = random.choice(SEARCH_QUERIES)
     print(f"[agent] scanning: {query}")
-    candidates = xb.search_recent_posts(query, max_results=5)  # kept small to limit Gemini calls per cycle
+    candidates = xb.search_recent_posts(query, max_results=5)
 
     for post in candidates:
         if storage.has_seen_thread(post["url"]):
@@ -98,22 +126,17 @@ def scan_and_draft(xb: XBrowser):
         thread = xb.read_thread(post["url"])
         existing_replies_text = "\n".join(thread["replies"][:5])
 
-        # if the post itself links to a product, try to read it for context
-        commenter_page_content = ""
-        # (left as best-effort: reading link would need URL extraction from post text/DOM,
-        #  wired in read_thread's article locator if a link element is present)
-
         classification = llm.classify_thread(
-            thread["post_text"] or post["text"], existing_replies_text, commenter_page_content
+            thread["post_text"] or post["text"], existing_replies_text, ""
         )
-        time.sleep(5)  # space out Gemini calls so a burst of candidates doesn't trip the RPM ceiling
+        time.sleep(5)  # spacing so a burst of candidates doesn't trip Gemini's RPM ceiling
 
         if classification["action"] == "skip":
             print(f"[agent] skipping {post['url']}: {classification['reasoning']}")
             continue
 
-        if classification["action"] == "mention" and not _can_post_mention_today():
-            print("[agent] mention cap reached today, downgrading to question or skipping")
+        if classification["action"] == "mention" and not _can_review_mention_today():
+            print("[agent] mention review cap reached today, skipping")
             continue
 
         draft_text = llm.draft_reply(
@@ -122,14 +145,13 @@ def scan_and_draft(xb: XBrowser):
             existing_replies_text,
             classification.get("pain_quote"),
         )
-        time.sleep(5)  # same spacing after the drafting call
+        time.sleep(5)
 
         if not draft_text:
             print(f"[agent] empty draft for {post['url']}, skipping")
             continue
 
-        style_key = _style_key_for(classification["action"])
-        draft_id = storage.add_draft(
+        storage.add_draft(
             thread_url=post["url"],
             author_handle=post["handle"],
             author_name=post["name"],
@@ -138,79 +160,29 @@ def scan_and_draft(xb: XBrowser):
             pain_quote=classification.get("pain_quote"),
             draft_type=classification["action"],
             draft_text=draft_text,
-            style_key=style_key,
+            style_key=classification["action"],
         )
         storage.log_activity(f"New draft ({classification['action']}) for {post['handle']}")
 
-        # auto-post if this style is trusted
-        if storage.is_auto_post_enabled(style_key) and _can_post_reply_now():
-            _post_draft(xb, draft_id)
-            jittered_delay()
 
-
-def _post_draft(xb: XBrowser, draft_id: int):
+def approve_draft(draft_id: int, edited_text: str = None):
+    """Called from the API when the user taps Approve. Returns
+    (success: bool, error: str or None, intent_url: str or None).
+    Does NOT post anything server-side — generates the tap-to-send link and
+    marks the draft ready, since sending itself happens on the operator's phone."""
     draft = storage.get_draft(draft_id)
     if not draft:
-        return
-    draft_type = draft["draft_type"]
-
-    if draft_type == "original_post":
-        success = xb.post_original(draft["draft_text"])
-    elif draft_type == "dm":
-        success = xb.send_dm(draft["thread_url"], draft["draft_text"])
-    else:
-        success = xb.post_reply(draft["thread_url"], draft["draft_text"])
-
-    if success:
-        storage.mark_draft_posted(draft_id)
-        if draft_type == "original_post":
-            storage.increment_counter("original_posts_posted")
-        else:
-            storage.increment_counter("replies_posted")
-            if draft_type == "mention":
-                storage.increment_counter("mentions_posted")
-        storage.log_activity(f"Auto-posted ({draft_type}) for {draft['author_handle']}")
-    else:
-        storage.log_activity(f"Failed to auto-post ({draft_type}) for {draft['author_handle']}")
-
-
-def approve_draft(xb: XBrowser, draft_id: int, edited_text: str = None):
-    """Called from the API when the user taps Approve (with optional edited text).
-    Returns (success: bool, error_message: str or None).
-    NOTE: xb is passed in for reference/nullability checks, but the actual Playwright
-    call is routed through submit_browser_task so it runs on the correct thread."""
-    draft = storage.get_draft(draft_id)
-    if not draft:
-        return False, "Draft not found"
+        return False, "Draft not found", None
     text_to_post = edited_text if edited_text else draft["draft_text"]
     draft_type = draft["draft_type"]
 
-    # pacing check differs by type — original posts have their own daily cap,
-    # not the reply pacing cap
     if draft_type == "original_post":
-        if not _can_post_original_today():
-            return False, "Original post cap reached for today"
+        intent_url = build_post_intent_url(text_to_post)
     else:
-        if not _can_post_reply_now():
-            storage.log_activity("Pacing cap reached — approval queued but not posted yet")
-            return False, "Reply pacing cap reached (15 per 30 min, or daily limit) — try again shortly"
+        intent_url = build_reply_intent_url(draft["thread_url"], text_to_post)
 
-    try:
-        if draft_type == "original_post":
-            success = submit_browser_task(xb.post_original, text_to_post)
-        elif draft_type == "dm":
-            success = submit_browser_task(xb.send_dm, draft["thread_url"], text_to_post)
-        else:
-            success = submit_browser_task(xb.post_reply, draft["thread_url"], text_to_post)
-    except Exception as e:
-        error_msg = f"Browser action failed: {e}"
-        storage.log_activity(f"Failed to post ({draft_type}) for {draft['author_handle']}: {e}")
-        return False, error_msg
-
-    if not success:
-        real_reason = xb.last_error or "no specific reason captured — check Render logs"
-        storage.log_activity(f"Failed to post ({draft_type}) for {draft['author_handle']}: {real_reason}")
-        return False, real_reason
+    if not intent_url:
+        return False, "Could not build a link for this draft (missing post ID)", None
 
     storage.update_draft_status(draft_id, "approved", draft_text=text_to_post)
     storage.mark_draft_posted(draft_id)
@@ -222,77 +194,16 @@ def approve_draft(xb: XBrowser, draft_id: int, edited_text: str = None):
         if draft_type == "mention":
             storage.increment_counter("mentions_posted")
 
-    storage.record_approval(draft["style_key"])
-    storage.log_activity(f"Posted ({draft_type}) for {draft['author_handle']} (approved)")
-    return True, None
+    storage.log_activity(f"Ready to send ({draft_type}) for {draft['author_handle']} — opened on your phone")
+    return True, None, intent_url
 
 
 def skip_draft(draft_id: int):
     storage.update_draft_status(draft_id, "skipped")
 
 
-def check_notifications(xb: XBrowser):
-    """Look for replies to the assistant's own posts and reactive DMs."""
-    if not storage.is_active():
-        return
-
-    mentions = xb.get_new_mentions()
-    for m in mentions:
-        if storage.has_seen_thread(m["url"]):
-            continue
-        storage.mark_thread_seen(m["url"])
-
-        result = llm.draft_followup_reply(
-            conversation_history="(original exchange context not retained across sessions yet)",
-            their_last_message=m["text"],
-        )
-        time.sleep(5)
-
-        if result["needs_human"]:
-            storage.add_draft(
-                thread_url=m["url"], author_handle=m["handle"], author_name=m["name"],
-                original_post=m["text"], context_snippet="", pain_quote=None,
-                draft_type="followup", draft_text="[Needs your personal response — they asked something that shouldn't be auto-answered]",
-                style_key="followup",
-            )
-            storage.log_activity(f"Flagged for you: reply from {m['handle']} needs a human")
-            continue
-
-        if result["status"] == "closed" or not result["reply"]:
-            continue
-
-        storage.add_draft(
-            thread_url=m["url"], author_handle=m["handle"], author_name=m["name"],
-            original_post=m["text"], context_snippet="", pain_quote=None,
-            draft_type="followup", draft_text=result["reply"], style_key="followup",
-        )
-        storage.log_activity(f"New follow-up draft for {m['handle']}")
-
-    dms = xb.get_new_dm_conversations()
-    for dm in dms:
-        if storage.has_seen_thread(dm["conversation_url"]):
-            continue
-        storage.mark_thread_seen(dm["conversation_url"])
-
-        result = llm.draft_followup_reply(
-            conversation_history="(DM thread)", their_last_message=dm["last_message"],
-        )
-        time.sleep(5)
-        if result["needs_human"] or result["status"] == "closed" or not result["reply"]:
-            if result["needs_human"]:
-                storage.log_activity("Flagged for you: a DM needs a human response")
-            continue
-
-        storage.add_draft(
-            thread_url=dm["conversation_url"], author_handle="(DM)", author_name="(DM)",
-            original_post=dm["last_message"], context_snippet="", pain_quote=None,
-            draft_type="dm", draft_text=result["reply"], style_key="dm",
-        )
-        storage.log_activity("New DM reply draft")
-
-
-def maybe_post_original(xb: XBrowser):
-    if not storage.is_active() or not _can_post_original_today():
+def maybe_queue_original_post():
+    if not storage.is_active() or not _can_review_original_today():
         return
     text = llm.draft_original_post()
     if not text:
@@ -305,17 +216,13 @@ def maybe_post_original(xb: XBrowser):
     storage.log_activity("New original post draft ready for review")
 
 
-# module-level reference so api.py can act on approvals immediately,
-# using the same live browser session the background loop owns.
-_xb_instance = None
-
-
-def get_browser():
-    return _xb_instance
+def like_intent_for_chat(url: str) -> str:
+    """Used by the chat panel's 'like <url>' command — returns a tap-to-like
+    link instead of trying to like it server-side."""
+    return build_like_intent_url(url)
 
 
 def search_web_for_chat(query: str):
-    """Thread-safe wrapper api.py can call to run a real web search through the live browser."""
     xb = get_browser()
     if xb is None:
         return []
@@ -326,132 +233,7 @@ def search_web_for_chat(query: str):
         return []
 
 
-def like_url_for_chat(url: str):
-    """Thread-safe wrapper: actually likes a post via the live browser session.
-    Returns (success: bool, error: str or None) — real result, not an LLM guess."""
-    xb = get_browser()
-    if xb is None:
-        return False, "browser isn't ready yet"
-    if not xb.logged_in:
-        return False, "not logged into X yet"
-    try:
-        success = submit_browser_task(xb.like_post, url)
-        return success, (None if success else (xb.last_error or "unknown failure"))
-    except Exception as e:
-        return False, str(e)
-
-
-def _map_same_site(raw_value) -> str:
-    """Cookie-Editor exports sameSite as lowercase strings like 'lax', 'strict',
-    'no_restriction', 'unspecified', or null — none of which match Playwright's
-    expected 'Strict'/'Lax'/'None' directly. This maps them properly instead of
-    silently defaulting everything to 'Lax'."""
-    if not raw_value:
-        return "Lax"
-    v = str(raw_value).strip().lower()
-    if v in ("no_restriction", "none"):
-        return "None"
-    if v == "strict":
-        return "Strict"
-    if v == "lax":
-        return "Lax"
-    return "Lax"  # unspecified or anything unrecognized — Lax is the safe default
-
-
-# critical cookies X's auth actually depends on — used for verbose diagnostics only
-CRITICAL_COOKIE_NAMES = {"auth_token", "ct0", "gt", "twid"}
-
-
-def import_session(cookie_json_str: str):
-    """Accepts pasted cookie data (either a bare array of cookie objects, like what
-    Cookie-Editor exports, or a full Playwright storage_state object) and writes it
-    to the session file in the format Playwright expects, then reloads the live
-    browser session immediately. Returns (success: bool, message: str, session_json: str or None)."""
-    try:
-        data = json.loads(cookie_json_str)
-    except Exception as e:
-        print(f"[agent] session import: invalid JSON — {e}")
-        return False, f"That doesn't look like valid JSON: {e}", None
-
-    # normalize into Playwright's storage_state shape: {"cookies": [...], "origins": []}
-    if isinstance(data, list):
-        cookies = data
-    elif isinstance(data, dict) and "cookies" in data:
-        cookies = data["cookies"]
-    else:
-        print("[agent] session import: unrecognized top-level format")
-        return False, "Unrecognized format — expected a cookie array or a storage_state object with a 'cookies' key", None
-
-    print(f"[agent] session import: received {len(cookies)} raw cookie entries")
-
-    normalized = []
-    x_domain_count = 0
-    for c in cookies:
-        if "name" not in c or "value" not in c:
-            continue
-        domain = c.get("domain", ".x.com")
-        if "x.com" in domain:
-            x_domain_count += 1
-        mapped_same_site = _map_same_site(c.get("sameSite"))
-        # Playwright/Chromium reject sameSite=None on a non-secure cookie
-        secure = c.get("secure", True)
-        if mapped_same_site == "None" and not secure:
-            mapped_same_site = "Lax"
-        normalized.append({
-            "name": c["name"],
-            "value": c["value"],
-            "domain": domain,
-            "path": c.get("path", "/"),
-            "expires": c.get("expires", c.get("expirationDate", -1)) or -1,
-            "httpOnly": c.get("httpOnly", False),
-            "secure": secure,
-            "sameSite": mapped_same_site,
-        })
-
-    if not normalized:
-        print("[agent] session import: no usable cookies after filtering")
-        return False, "No usable cookies found in that data", None
-
-    print(f"[agent] session import: {x_domain_count} cookies scoped to x.com out of {len(normalized)} total")
-    found_critical = {c["name"] for c in normalized if c["name"] in CRITICAL_COOKIE_NAMES}
-    missing_critical = CRITICAL_COOKIE_NAMES - found_critical
-    print(f"[agent] session import: critical auth cookies found={sorted(found_critical)} missing={sorted(missing_critical)}")
-    if missing_critical:
-        print(f"[agent] session import WARNING: missing {sorted(missing_critical)} — login will likely fail without these")
-
-    storage_state = {"cookies": normalized, "origins": []}
-    storage_state_json = json.dumps(storage_state)
-    try:
-        with open(config.SESSION_STATE_PATH, "w") as f:
-            f.write(storage_state_json)
-        print(f"[agent] session import: wrote {len(normalized)} cookies to {config.SESSION_STATE_PATH}")
-    except Exception as e:
-        print(f"[agent] session import: failed to write session file — {e}")
-        return False, f"Could not save session file: {e}", None
-
-    xb = get_browser()
-    if xb is None:
-        print("[agent] session import: browser not ready yet, session will load on next start")
-        return True, "Session saved, but browser isn't ready yet to reload it — it'll be picked up on next restart", storage_state_json
-
-    print("[agent] session import: reloading live browser session now")
-    try:
-        logged_in = submit_browser_task(xb.reload_session)
-    except Exception as e:
-        print(f"[agent] session import: reload_session task failed — {e}")
-        return False, f"Session saved but reload failed: {e}", storage_state_json
-
-    print(f"[agent] session import: post-reload login check result = {logged_in}")
-    if logged_in:
-        storage.log_activity("Session imported successfully — now logged into X")
-        return True, f"Imported {len(normalized)} cookies and reloaded — now logged into X! Copy the JSON below into an X_SESSION_JSON env var on Render so this survives redeploys.", storage_state_json
-    else:
-        storage.log_activity("Session imported but still not logged in — cookies may be incomplete/expired")
-        return False, f"Imported {len(normalized)} cookies, but still not showing as logged in — the session may be missing key cookies or already expired", storage_state_json
-
-
 def fetch_url_for_chat(url: str) -> str:
-    """Thread-safe wrapper api.py can call to fetch a URL through the live browser session."""
     xb = get_browser()
     if xb is None:
         return "(browser isn't ready yet, try again shortly)"
@@ -470,56 +252,30 @@ def run_loop():
     xb = XBrowser()
     xb.start()
     _xb_instance = xb
-    print("[agent] browser started (usable for page reads immediately)")
-
-    xb.try_login()  # non-fatal — logs and continues either way
-    if xb.logged_in:
-        print("[agent] X login successful, entering main loop")
-        storage.log_activity("Logged into X successfully — scanning and posting are active")
-    else:
-        print("[agent] X login not active — scanning/posting to X paused, "
-              "but chat and URL-reading still work. Will retry login periodically.")
-        storage.log_activity("Not logged into X yet — scanning/posting paused, chat still works")
+    print("[agent] browser started (read-only), entering main loop")
 
     last_scan = 0
-    last_notification_check = 0
     last_original_post_check = 0
-    last_login_retry = time.time()
 
     try:
         while True:
             now = time.time()
 
-            if not xb.logged_in and now - last_login_retry > 10 * 60:  # retry every 10 min
-                print("[agent] retrying X login")
-                xb.try_login()
-                last_login_retry = now
-
-            if xb.logged_in and now - last_scan > config.SCAN_INTERVAL_SECONDS:
+            if now - last_scan > config.SCAN_INTERVAL_SECONDS:
                 try:
                     scan_and_draft(xb)
                 except Exception as e:
                     print(f"[agent] scan error: {e}")
                 last_scan = now
 
-            if xb.logged_in and now - last_notification_check > config.NOTIFICATION_CHECK_INTERVAL_SECONDS:
+            if now - last_original_post_check > 6 * 60 * 60:
                 try:
-                    check_notifications(xb)
-                except Exception as e:
-                    print(f"[agent] notification check error: {e}")
-                last_notification_check = now
-
-            if xb.logged_in and now - last_original_post_check > 6 * 60 * 60:  # check every 6 hours
-                try:
-                    maybe_post_original(xb)
+                    maybe_queue_original_post()
                 except Exception as e:
                     print(f"[agent] original post error: {e}")
                 last_original_post_check = now
 
-            # run any queued cross-thread browser tasks (e.g. chat asking to fetch a URL,
-            # or a dashboard approval) right here, in this thread, since Playwright must
-            # stay single-threaded. Checked frequently (every ~3s below) so these don't
-            # sit waiting behind a full 30s scan cycle.
+            # drain queued cross-thread browser tasks (chat URL fetches / searches)
             while True:
                 try:
                     task = _task_queue.get_nowait()

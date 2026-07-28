@@ -1,13 +1,21 @@
 """
-browser.py — the only file that touches Playwright / the actual browser.
-Everything here operates on a live X (twitter.com) session. Nothing here calls
-Gemini or the database directly — it just returns plain data (dicts/strings)
-for agent.py to act on.
+browser.py — Playwright automation, read-only by design.
 
-NOTE ON SELECTORS: X's DOM changes periodically. The data-testid attributes
-used below (tweet, tweetText, reply, etc.) have been stable identifiers for
-X's web client for a long time, but if X ships a redesign, these may need
-updating — check with browser dev tools if scanning/posting starts failing.
+We deliberately do NOT attempt to log into X from the server anymore. X's
+anti-automation system (Arkose) reliably blocks server-side logins and cookie
+replay from datacenter IPs — confirmed by both our own testing and outside
+sources on this exact failure mode. Fighting that further has diminishing
+returns, so this file only does what works reliably logged-out:
+  - searching X for candidate threads
+  - reading a thread's post + replies
+  - reading an arbitrary external URL (for chat / commenter-link context)
+  - a general web search fallback (DuckDuckGo)
+
+Actually posting/replying/liking happens on the OPERATOR'S OWN PHONE via
+X's "intent" links (see build_reply_intent_url / build_like_intent_url /
+build_post_intent_url in agent.py) — the dashboard opens these for you to
+tap "Post" yourself, using your own already-logged-in session. That's the
+only step that ever needed a real login, so that's the only step we hand off.
 """
 
 import time
@@ -19,17 +27,10 @@ import config
 
 BASE_URL = "https://x.com"
 
-
-import os
-
 DEBUG_SCREENSHOT_PATH = "/tmp/debug_last_failure.png"
 
 
 def _save_debug_screenshot(page, label: str):
-    """Saves a screenshot of whatever the page currently shows, whenever an
-    interactive action fails. Lets you actually SEE what X is rendering
-    (an interstitial, a challenge, a restricted view, etc.) instead of guessing
-    from a timeout message alone. View it at /api/debug/screenshot on the dashboard."""
     try:
         page.screenshot(path=DEBUG_SCREENSHOT_PATH)
         print(f"[browser] saved debug screenshot for '{label}' — view at /api/debug/screenshot")
@@ -38,241 +39,54 @@ def _save_debug_screenshot(page, label: str):
 
 
 class XBrowser:
-    """Wraps a single persistent Playwright browser context for the assistant account."""
+    """Wraps a single persistent Playwright browser context, used read-only."""
 
     def __init__(self):
         self._playwright = None
         self._browser = None
         self._context = None
         self._page = None
-        self.logged_in = False
-        self.last_error = None
 
     def start(self):
         self._playwright = sync_playwright().start()
-
-        # if a session was saved as an env var (to survive Render's ephemeral disk
-        # across redeploys), write it to the expected file path before anything
-        # else tries to load it — this only happens if no local file already exists,
-        # so it doesn't clobber a fresher session written by an in-app import.
-        if config.X_SESSION_JSON and not os.path.exists(config.SESSION_STATE_PATH):
-            try:
-                with open(config.SESSION_STATE_PATH, "w") as f:
-                    f.write(config.X_SESSION_JSON)
-                print("[browser] wrote session from X_SESSION_JSON env var (surviving redeploy)")
-            except Exception as e:
-                print(f"[browser] could not write session from env var: {e}")
-
         self._browser = self._playwright.chromium.launch(
             headless=config.HEADLESS,
             args=[
-                # this specific flag is the main thing sites check for to detect
-                # headless/automated Chromium — disabling it removes that signal
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
                 "--no-sandbox",
             ],
         )
-        context_kwargs = {
-            # a realistic desktop Chrome UA instead of Playwright's default,
-            # which otherwise announces itself as an automated/headless client
-            "user_agent": (
+        self._context = self._browser.new_context(
+            user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
             ),
-            "viewport": {"width": 1280, "height": 800},
-            "locale": "en-US",
-            "timezone_id": "America/New_York",
-        }
-        self._context_kwargs = context_kwargs  # saved so reload_session() can reuse it
-        try:
-            self._context = self._browser.new_context(
-                storage_state=config.SESSION_STATE_PATH, **context_kwargs
-            )
-            print("[browser] reusing saved session")
-        except Exception:
-            self._context = self._browser.new_context(**context_kwargs)
-            print("[browser] no saved session found, starting fresh")
-
-        # extra layer: explicitly hide the webdriver flag on every page before any
-        # site JS runs, since some anti-bot checks look for navigator.webdriver
-        # even with the launch flag above already suppressing it in most cases
-        self._context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
-        )
-
-        self._page = self._context.new_page()
-        # NOTE: login is intentionally NOT attempted here. The browser is usable
-        # for general page-reading (e.g. chat asking it to look at a URL) as soon
-        # as it starts, independent of whether X credentials are configured or
-        # whether login succeeds. Call try_login() separately for X-specific work.
-        self.logged_in = False
-
-    def try_login(self) -> bool:
-        """Attempts X login if credentials are configured. Never raises — returns
-        True/False and logs the outcome, so a missing/failing login doesn't take
-        down the rest of the browser's usefulness (e.g. reading external URLs)."""
-        if not config.X_USERNAME or not config.X_PASSWORD:
-            print("[browser] X_USERNAME/X_PASSWORD not set — skipping X login. "
-                  "General page-reading still works, but scanning/posting to X won't until these are set.")
-            self.logged_in = False
-            return False
-        try:
-            self._ensure_logged_in()
-            self.logged_in = True
-            return True
-        except Exception as e:
-            print(f"[browser] X login failed: {e}")
-            self.logged_in = False
-            return False
-
-    def reload_session(self) -> bool:
-        """Closes the current context and reopens one loaded from whatever is
-        currently saved at config.SESSION_STATE_PATH — used right after a session
-        is imported via the dashboard, so it takes effect immediately without
-        restarting the whole browser process. Returns whether it's now logged in."""
-        try:
-            if self._context:
-                self._context.close()
-        except Exception as e:
-            print(f"[browser] error closing old context during reload: {e}")
-
-        self._context = self._browser.new_context(
-            storage_state=config.SESSION_STATE_PATH, **self._context_kwargs
+            viewport={"width": 1280, "height": 800},
+            locale="en-US",
+            timezone_id="America/New_York",
         )
         self._context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
         )
         self._page = self._context.new_page()
-        self.logged_in = self._is_logged_in()
-        if self.logged_in:
-            print("[browser] session reload successful — now logged in")
-        else:
-            print("[browser] session reload completed but still not logged in — check the imported cookies")
-        return self.logged_in
+        print("[browser] started (read-only mode — no login attempted)")
 
     def stop(self):
-        if self._context:
-            self._context.storage_state(path=config.SESSION_STATE_PATH)
         if self._browser:
             self._browser.close()
         if self._playwright:
             self._playwright.stop()
 
-    # ─── Login / session ────────────────────────────────────────────────
-    def _is_logged_in(self) -> bool:
-        self._page.goto(f"{BASE_URL}/home", wait_until="domcontentloaded")
-        time.sleep(2)
-        if "login" in self._page.url or "flow" in self._page.url:
-            return False
-        # the URL alone isn't reliable — X sometimes shows a logged-out view at
-        # /home without redirecting to an obvious /login URL. Confirm by checking
-        # for an element that only renders for an authenticated session.
-        try:
-            self._page.locator('[data-testid="SideNav_NewTweet_Button"]').first.wait_for(
-                state="visible", timeout=8000
-            )
-            return True
-        except Exception:
-            print("[browser] /home loaded but no authenticated UI found — treating as logged out")
-            return False
-
-    def _find_username_field(self, page, timeout_ms=25000):
-        """Looks for the username field on the main page first, then falls back to
-        searching inside any iframes (some login/verification flows embed the actual
-        form in a frame). Returns a Locator, or None if not found anywhere."""
-        try:
-            field = page.locator('input[autocomplete="username"]').first
-            field.wait_for(state="visible", timeout=timeout_ms)
-            return field
-        except Exception:
-            pass
-
-        # fallback: search every frame on the page, not just the main one
-        deadline = time.time() + 8
-        while time.time() < deadline:
-            for frame in page.frames:
-                try:
-                    field = frame.locator('input[autocomplete="username"]').first
-                    if field.count() > 0 and field.is_visible():
-                        print(f"[browser] found username field inside an iframe ({frame.url})")
-                        return field
-                except Exception:
-                    continue
-            time.sleep(1)
-        return None
-
-    def _detect_challenge(self, page) -> str:
-        """Checks page content for known bot-verification/CAPTCHA indicators, so a
-        login failure can be diagnosed definitively instead of guessed at again."""
-        try:
-            content = page.content().lower()
-            indicators = {
-                "arkose": "Arkose Labs bot-verification challenge",
-                "funcaptcha": "FunCaptcha challenge",
-                "hcaptcha": "hCaptcha challenge",
-                "unusual login activity": "X's 'unusual login activity' verification step",
-                "verify your identity": "identity verification step",
-            }
-            for key, label in indicators.items():
-                if key in content:
-                    return label
-        except Exception:
-            pass
-        return ""
-
-    def _ensure_logged_in(self):
-        if self._is_logged_in():
-            print("[browser] session already valid, skipping login")
-            return
-
-        print("[browser] logging in fresh")
-        page = self._page
-        page.goto(f"{BASE_URL}/i/flow/login", wait_until="domcontentloaded")
-        time.sleep(2)
-
-        # username step — checks main page, then iframes, with a longer wait
-        username_field = self._find_username_field(page)
-        if username_field is None:
-            challenge = self._detect_challenge(page)
-            _save_debug_screenshot(page, "login_username_field_missing")
-            reason = f" — detected: {challenge}" if challenge else " — no known challenge detected, see screenshot"
-            raise RuntimeError(f"Username field never appeared on login page{reason}")
-
-        username_field.fill(config.X_USERNAME)
-        page.keyboard.press("Enter")
-        time.sleep(2)
-
-        # X sometimes asks for a second identity check (phone/email) before password
-        # if it thinks the login looks unusual — handle the common case where it doesn't.
-        try:
-            page.wait_for_selector('input[name="password"]', timeout=8000)
-        except Exception:
-            challenge = self._detect_challenge(page)
-            _save_debug_screenshot(page, "login_unexpected_checkpoint")
-            reason = f": {challenge}" if challenge else " (unknown checkpoint, see /api/debug/screenshot)"
-            print(f"[browser] unexpected extra verification step{reason}")
-            raise RuntimeError(f"X login requires manual verification step{reason}")
-
-        page.fill('input[name="password"]', config.X_PASSWORD)
-        page.keyboard.press("Enter")
-        time.sleep(3)
-
-        if not self._is_logged_in():
-            challenge = self._detect_challenge(page)
-            _save_debug_screenshot(page, "login_final_check_failed")
-            reason = f": {challenge}" if challenge else " (see /api/debug/screenshot)"
-            raise RuntimeError(f"X login failed{reason} — check credentials, or a 2FA/verification step is blocking automated login")
-
-        self._context.storage_state(path=config.SESSION_STATE_PATH)
-        print("[browser] login successful, session saved")
-
-    # ─── Scanning for candidate threads ─────────────────────────────────
-    def search_recent_posts(self, query: str, max_results: int = 15):
-        """Searches X for recent posts matching a query. Returns list of {url, handle, name, text}."""
+    # ─── Scanning for candidate threads (works logged out) ──────────────
+    def search_recent_posts(self, query: str, max_results: int = 5):
         page = self._page
         search_url = f"{BASE_URL}/search?q={query.replace(' ', '%20')}&src=typed_query&f=live"
-        page.goto(search_url, wait_until="domcontentloaded")
+        try:
+            page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
+        except Exception as e:
+            print(f"[browser] search navigation failed: {e}")
+            return []
         time.sleep(3)
 
         results = []
@@ -309,11 +123,14 @@ class XBrowser:
 
         return results
 
-    # ─── Reading a full thread (post + replies) ─────────────────────────
+    # ─── Reading a full thread (post + replies), works logged out ───────
     def read_thread(self, thread_url: str):
-        """Returns {"post_text": str, "replies": [str, ...]}"""
         page = self._page
-        page.goto(thread_url, wait_until="domcontentloaded")
+        try:
+            page.goto(thread_url, wait_until="domcontentloaded", timeout=20000)
+        except Exception as e:
+            print(f"[browser] could not load thread {thread_url}: {e}")
+            return {"post_text": "", "replies": []}
         time.sleep(2)
 
         articles = page.locator('article[data-testid="tweet"]')
@@ -335,9 +152,8 @@ class XBrowser:
 
         return {"post_text": post_text, "replies": replies}
 
-    # ─── Opening a commenter's linked product page ──────────────────────
+    # ─── Reading an arbitrary external link (chat: "check this URL") ────
     def read_external_link(self, url: str, max_chars: int = 1500) -> str:
-        """Opens an external URL in a new tab and grabs visible text content. Best-effort."""
         try:
             new_page = self._context.new_page()
             new_page.goto(url, wait_until="domcontentloaded", timeout=25000)
@@ -349,11 +165,8 @@ class XBrowser:
             print(f"[browser] could not read external link {url}: {e}")
             return ""
 
-    # ─── General web search (for chat: "search X for Y" style requests) ──
+    # ─── General web search (chat: "search X for Y") ────────────────────
     def web_search(self, query: str, max_results: int = 5):
-        """Runs a search on DuckDuckGo's HTML endpoint (no JS required, doesn't need
-        login, and is much more scrape-friendly than Google). Returns list of
-        {title, snippet, url}."""
         try:
             new_page = self._context.new_page()
             search_url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
@@ -380,199 +193,9 @@ class XBrowser:
             print(f"[browser] web search failed for '{query}': {e}")
             return []
 
-    # ─── Liking a post (simplest possible way to verify login works for real) ─
-    def _check_still_logged_in_after_failure(self, page):
-        """Called when an action (like/reply/post) fails, to distinguish 'X logged us
-        out mid-session' from some other transient failure. If the page is showing a
-        logged-out view, flips self.logged_in so the retry loop picks it back up,
-        instead of the app silently continuing to assume it's still authenticated."""
-        try:
-            url = page.url
-            if "login" in url or "logout" in url or "flow" in url:
-                print("[browser] detected logged-out URL after action failure — session likely invalidated")
-                self.logged_in = False
-                return
-            # also check for the logged-out page's signup sidebar as a fallback signal
-            if page.locator("text=Sign up with Google").count() > 0 or page.locator("text=New to X?").count() > 0:
-                print("[browser] detected logged-out page content after action failure — session likely invalidated")
-                self.logged_in = False
-        except Exception as e:
-            print(f"[browser] could not verify login state after failure: {e}")
-
-    def like_post(self, thread_url: str) -> bool:
-        page = self._page
-        print(f"[browser] attempting to like {thread_url}")
-        try:
-            page.goto(thread_url, wait_until="domcontentloaded")
-            time.sleep(2)
-            like_button = page.locator('[data-testid="like"]').first
-            like_button.wait_for(state="visible", timeout=15000)
-            like_button.click()
-            time.sleep(1.5)
-            print(f"[browser] liked {thread_url}")
-            return True
-        except Exception as e:
-            print(f"[browser] failed to like {thread_url}: {e}")
-            self.last_error = f"Failed to like post: {e}"
-            _save_debug_screenshot(page, "like_post")
-            self._check_still_logged_in_after_failure(page)
-            return False
-
-    # ─── Posting a reply ─────────────────────────────────────────────────
-    def post_reply(self, thread_url: str, reply_text: str) -> bool:
-        page = self._page
-        print(f"[browser] attempting to post reply to {thread_url}")
-        try:
-            page.goto(thread_url, wait_until="domcontentloaded")
-            time.sleep(2)
-
-            reply_box = page.locator('[data-testid="tweetTextarea_0"]').first
-            reply_box.click()
-            reply_box.fill(reply_text)
-            time.sleep(1)
-
-            send_button = page.locator('[data-testid="tweetButton"]').first
-            send_button.click()
-            time.sleep(2)
-            print(f"[browser] posted reply to {thread_url}")
-            return True
-        except Exception as e:
-            print(f"[browser] failed to post reply to {thread_url}: {e}")
-            _save_debug_screenshot(page, "post_reply")
-            self._check_still_logged_in_after_failure(page)
-            return False
-
-    # ─── Posting an original post ────────────────────────────────────────
-    def post_original(self, text: str) -> bool:
-        page = self._page
-        print("[browser] attempting to post an original post")
-
-        # primary path: dedicated compose URL
-        try:
-            page.goto(f"{BASE_URL}/compose/post", wait_until="domcontentloaded")
-            box = page.locator('[data-testid="tweetTextarea_0"]').first
-            box.wait_for(state="visible", timeout=15000)
-            box.click()
-            box.fill(text)
-            time.sleep(1)
-            page.locator('[data-testid="tweetButton"]').first.click()
-            time.sleep(2)
-            print("[browser] posted original via /compose/post")
-            return True
-        except Exception as e:
-            print(f"[browser] /compose/post path failed ({e}), trying home feed compose button fallback")
-            _save_debug_screenshot(page, "compose_post_primary")
-
-        # fallback: go to home feed and click the "New post" button to open the composer,
-        # since X's dedicated compose URL doesn't always render reliably
-        try:
-            page.goto(f"{BASE_URL}/home", wait_until="domcontentloaded")
-            time.sleep(2)
-            new_post_button = page.locator('[data-testid="SideNav_NewTweet_Button"]').first
-            new_post_button.wait_for(state="visible", timeout=15000)
-            new_post_button.click()
-            time.sleep(1.5)
-
-            box = page.locator('[data-testid="tweetTextarea_0"]').first
-            box.wait_for(state="visible", timeout=15000)
-            box.click()
-            box.fill(text)
-            time.sleep(1)
-            page.locator('[data-testid="tweetButton"]').first.click()
-            time.sleep(2)
-            print("[browser] posted original via home feed compose button")
-            return True
-        except Exception as e:
-            print(f"[browser] home feed compose fallback also failed: {e}")
-            self.last_error = f"Both compose paths failed to post original post: {e}"
-            _save_debug_screenshot(page, "compose_post_fallback")
-            self._check_still_logged_in_after_failure(page)
-            return False
-
-    # ─── Notifications / mentions (replies to the assistant's own posts) ─
-    def get_new_mentions(self, max_results: int = 15):
-        """Returns list of {url, handle, name, text} for recent replies to the assistant account."""
-        page = self._page
-        page.goto(f"{BASE_URL}/notifications/mentions", wait_until="domcontentloaded")
-        time.sleep(3)
-
-        results = []
-        articles = page.locator('article[data-testid="tweet"]')
-        count = min(articles.count(), max_results)
-        for i in range(count):
-            try:
-                article = articles.nth(i)
-                text_el = article.locator('[data-testid="tweetText"]').first
-                text = text_el.inner_text() if text_el.count() else ""
-                link_el = article.locator('a[href*="/status/"]').first
-                href = link_el.get_attribute("href") if link_el.count() else None
-                if not href:
-                    continue
-                url = f"{BASE_URL}{href}" if href.startswith("/") else href
-                handle_el = article.locator('[data-testid="User-Name"] a').first
-                handle = handle_el.get_attribute("href") if handle_el.count() else ""
-                handle = handle.strip("/").split("/")[-1] if handle else "unknown"
-                name_el = article.locator('[data-testid="User-Name"] span').first
-                name = name_el.inner_text() if name_el.count() else handle
-                results.append({"url": url, "handle": f"@{handle}", "name": name, "text": text})
-            except Exception:
-                continue
-        return results
-
-    # ─── Reactive DMs ─────────────────────────────────────────────────────
-    def get_new_dm_conversations(self, max_results: int = 10):
-        """Returns list of {conversation_url, handle, last_message} for DMs where the other
-        person sent the most recent message (i.e. reactive — they messaged first/most recently)."""
-        page = self._page
-        page.goto(f"{BASE_URL}/messages", wait_until="domcontentloaded")
-        time.sleep(3)
-
-        results = []
-        conversations = page.locator('[data-testid="conversation"]')
-        count = min(conversations.count(), max_results)
-        for i in range(count):
-            try:
-                convo = conversations.nth(i)
-                # X bolds/highlights unread conversations — this is a best-effort check
-                unread = convo.locator('[data-testid="socialContext"]').count() > 0
-                if not unread:
-                    continue
-                convo.click()
-                time.sleep(2)
-                last_msg_el = page.locator('[data-testid="messageEntry"]').last
-                last_message = last_msg_el.inner_text() if last_msg_el.count() else ""
-                results.append({
-                    "conversation_url": page.url,
-                    "last_message": last_message,
-                })
-            except Exception:
-                continue
-        return results
-
-    def send_dm(self, conversation_url: str, text: str) -> bool:
-        page = self._page
-        print(f"[browser] attempting to send DM in {conversation_url}")
-        try:
-            page.goto(conversation_url, wait_until="domcontentloaded")
-            time.sleep(2)
-            box = page.locator('[data-testid="dmComposerTextInput"]').first
-            box.click()
-            box.fill(text)
-            time.sleep(1)
-            page.locator('[data-testid="dmComposerSendButton"]').first.click()
-            time.sleep(1)
-            print(f"[browser] sent DM in {conversation_url}")
-            return True
-        except Exception as e:
-            print(f"[browser] failed to send DM: {e}")
-            self._check_still_logged_in_after_failure(page)
-            return False
-
 
 def jittered_delay():
-    """Random delay between actions, weighted toward the higher end — avoids
-    a metronome-even reply cadence that reads as automated."""
+    """Random delay between actions, weighted toward the higher end."""
     lo, hi = config.MIN_GAP_SECONDS, config.MAX_GAP_SECONDS
-    # weight toward higher end using a simple triangular distribution
     delay = random.triangular(lo, hi, hi)
     time.sleep(delay)

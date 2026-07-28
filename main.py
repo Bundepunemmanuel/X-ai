@@ -31,12 +31,9 @@ def dashboard():
 
 @app.get("/api/debug/screenshot")
 def debug_screenshot():
-    """Open this URL directly in a browser to see exactly what X rendered the
-    last time an interactive action (like, reply, compose) failed. Only shows
-    up once something has actually failed — check Render logs for the label."""
     if os.path.exists(DEBUG_SCREENSHOT_PATH):
         return FileResponse(DEBUG_SCREENSHOT_PATH, media_type="image/png")
-    return {"error": "No debug screenshot saved yet — nothing has failed since the last restart."}
+    return {"error": "No debug screenshot saved yet."}
 
 
 @app.on_event("startup")
