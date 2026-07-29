@@ -196,12 +196,16 @@ def _post_process(reply: str, product_name: str = None) -> str:
 
 
 # ─── Classification: does this thread deserve a reply, and what kind? ──────
-def classify_thread(post_text: str, existing_replies: str, commenter_page_content: str = "") -> dict:
+def classify_thread(post_text: str, existing_replies: str, commenter_page_content: str = "", knowledge_base: str = "") -> dict:
     """
-    Returns: {"action": "question" | "mention" | "skip", "reasoning": str, "pain_quote": str or None}
+    Returns: {"action": "question" | "mention" | "skip" | "ask_operator",
+              "reasoning": str, "pain_quote": str or None, "operator_question": str or None}
     """
     prompt = f"""You are deciding how (or whether) to reply to this X/Twitter thread, on behalf of
-someone who builds tools for indie founders. Their product is {config.PRODUCT_NAME}: {config.PRODUCT_DESCRIPTION}
+someone who builds {config.PRODUCT_NAME}, a tool for indie founders.
+
+Everything currently known about {config.PRODUCT_NAME}:
+{knowledge_base or config.PRODUCT_DESCRIPTION}
 
 The core rule: HELP FIRST. Only suggest the product if the person has expressed a real pain point
 it genuinely solves. Never force a mention into an unrelated thread. It's completely fine to decide
@@ -213,25 +217,31 @@ Existing replies in the thread: "{existing_replies or 'none yet'}"
 
 {"Commenter's own product page content: " + commenter_page_content[:800] if commenter_page_content else ""}
 
-Decide one of three actions:
+Decide one of four actions:
 - "question": ask a genuine, curious clarifying question (e.g. "what problem does it solve?",
   "is it only web app?") — use this when there's no clear pain point yet to respond to
 - "mention": the person has clearly expressed a pain point that {config.PRODUCT_NAME} solves —
-  respond to their book response helpfully, and it's natural to mention {config.PRODUCT_NAME}
+  respond to their post helpfully, and it's natural to mention {config.PRODUCT_NAME}
 - "skip": this thread isn't a good fit at all (irrelevant, already well-covered, nothing to add)
+- "ask_operator": the pain point seems like it MIGHT be a great fit, but answering confidently
+  requires a specific fact about {config.PRODUCT_NAME} that isn't in the knowledge above (e.g. does
+  it integrate with X, does it have a specific feature, what's a specific number/limit). Use this
+  rather than guessing or making something up.
 
 Respond with ONLY a JSON object, no markdown, no explanation:
-{{"action": "question" or "mention" or "skip", "reasoning": "one short sentence why", "pain_quote": "the exact phrase that reveals their pain, or null"}}"""
+{{"action": "question" or "mention" or "skip" or "ask_operator", "reasoning": "one short sentence why",
+"pain_quote": "the exact phrase that reveals their pain, or null",
+"operator_question": "the specific question to ask the operator, only if action is ask_operator, else null"}}"""
 
     raw = _call_gemini(prompt, temperature=0.4, max_tokens=600)
     parsed = _parse_json(raw)
-    if not parsed or parsed.get("action") not in ("question", "mention", "skip"):
-        return {"action": "skip", "reasoning": "classification failed", "pain_quote": None}
+    if not parsed or parsed.get("action") not in ("question", "mention", "skip", "ask_operator"):
+        return {"action": "skip", "reasoning": "classification failed", "pain_quote": None, "operator_question": None}
     return parsed
 
 
 # ─── Drafting a reply ──────────────────────────────────────────────────────
-def draft_reply(action: str, post_text: str, existing_replies: str, pain_quote: str = None) -> str:
+def draft_reply(action: str, post_text: str, existing_replies: str, pain_quote: str = None, knowledge_base: str = "") -> str:
     voice = pick_voice()
 
     length_variance_rule = (
@@ -268,7 +278,9 @@ Write only the reply text. Nothing else."""
 Original post: "{post_text}"
 Existing replies: "{existing_replies or 'none yet'}"
 
-Product: {config.PRODUCT_NAME} — {config.PRODUCT_DESCRIPTION}
+Everything known about {config.PRODUCT_NAME} (use whatever specific detail actually fits — pricing,
+a specific feature, the demand-type framework, etc. — don't just default to the generic pitch):
+{knowledge_base or config.PRODUCT_DESCRIPTION}
 Product URL: {config.PRODUCT_URL}
 
 Voice for this reply: {voice['instruction']}
@@ -373,22 +385,26 @@ def _clean_chat_reply(text: str) -> str:
 
 
 # ─── Chat panel: one combined call that decides + responds, to save quota ──
-def chat_turn(user_message: str, activity_context: str, chat_history: str = "", page_content: str = "") -> dict:
-    """Single Gemini call that both decides whether live search is needed AND,
-    if not, writes the actual reply — cutting the common case down from 2 calls
-    to 1. Returns {"needs_search": bool, "query": str or None, "reply": str or None}.
-    If needs_search is true, reply will be None and the caller must run a search
-    and then call chat_respond_with_results() for a second, final call."""
+def chat_turn(user_message: str, activity_context: str, chat_history: str = "", page_content: str = "", knowledge_base: str = "") -> dict:
+    """Single Gemini call that decides whether live search is needed, writes the
+    reply if not, and extracts any new Kairo facts the operator just mentioned so
+    the knowledge base can grow over time. Returns:
+    {"needs_search": bool, "query": str or None, "reply": str or None,
+     "new_kairo_fact": str or None}"""
     url_context = ""
     if page_content:
         url_context = "They shared a URL. Here is the actual page content that was just fetched:\n" + page_content[:1200]
 
-    prompt = f"""You are the X reply assistant itself, talking directly to your operator in a
-dashboard chat panel. Be direct and concise — a capable assistant giving a status update or
-taking an instruction, not a generic chatbot.
+    prompt = f"""You are the assistant itself — a witty, dry, slightly sardonic AI in the style of
+Jarvis (Tony Stark's assistant), talking directly to your operator in a dashboard chat panel.
+You're capable and a little deadpan, not a generic cheerful chatbot. You still give real, accurate
+answers — the wit is in the delivery, never at the expense of being genuinely useful or honest.
 
 Your recent activity:
 {activity_context}
+
+Everything you know about {config.PRODUCT_NAME} (the product you're promoting on X):
+{knowledge_base or "nothing specific on file yet"}
 
 Recent conversation:
 {chat_history}
@@ -402,6 +418,11 @@ rankings, real download/revenue numbers, "search X for Y", anything needing curr
 can't know for certain)? If a URL's content is already provided above, that counts as already
 having the data you need — no search required for that.
 
+Separately: if the operator's message states a NEW fact about {config.PRODUCT_NAME} (a feature,
+pricing change, something it now does, a correction) rather than just asking a question or giving
+an instruction, extract that fact plainly so it can be remembered permanently. If they're just
+asking something or giving an instruction, this should be null.
+
 If NO search is needed, write the actual reply now, following these rules:
 - Never invent specific numbers, prices, or facts you don't actually have. If you don't
   genuinely know something as established fact, say so plainly instead of guessing.
@@ -409,27 +430,29 @@ If NO search is needed, write the actual reply now, following these rules:
   — no "browser loop issues," "resetting the connection," or similar, unless those exact words
   appear in the activity log above. If nothing relevant is logged, say you don't have a
   specific reason logged rather than inventing a technical-sounding one.
+- If asked about {config.PRODUCT_NAME} specifically, use the knowledge above. If something's
+  genuinely missing from it, say so plainly and ask the operator directly, rather than guessing.
 - If they're asking about your activity, use only the activity log above.
 - If page content was provided above, answer using those actual facts.
 - Never claim you're "scanning in the background" — you have no such capability.
-- Under 50 words, plain sentences, no bullets/asterisks/markdown.
+- Dry wit is welcome, but stay under 50 words, plain sentences, no bullets/asterisks/markdown.
 
 If search IS needed, leave reply as null — do not guess an answer.
 
 Respond with ONLY JSON, no markdown:
-{{"needs_search": true or false, "query": "short 3-6 word search query or null", "reply": "the reply text, or null if search is needed"}}"""
+{{"needs_search": true or false, "query": "short 3-6 word search query or null", "reply": "the reply text, or null if search is needed", "new_kairo_fact": "the new fact stated, or null"}}"""
 
     raw = _call_gemini(prompt, temperature=0.5, max_tokens=800)
     parsed = _parse_json(raw)
     if not parsed:
-        return {"needs_search": False, "query": None, "reply": "Sorry, I couldn't process that — try again?"}
+        return {"needs_search": False, "query": None, "reply": "Sorry, I couldn't process that — try again?", "new_kairo_fact": None}
     if parsed.get("reply"):
         parsed["reply"] = _clean_chat_reply(parsed["reply"])
     return parsed
 
 
 # ─── Chat panel: answer questions about the assistant's own activity ───────
-def chat_respond(user_message: str, activity_context: str, chat_history: str = "", page_content: str = "", search_results: str = "") -> str:
+def chat_respond(user_message: str, activity_context: str, chat_history: str = "", page_content: str = "", search_results: str = "", knowledge_base: str = "") -> str:
     url_context = ""
     if page_content:
         url_context = "They shared a URL. Here is the actual page content that was just fetched:\n" + page_content[:1200]
@@ -438,12 +461,15 @@ def chat_respond(user_message: str, activity_context: str, chat_history: str = "
     if search_results:
         search_context = "A live web search was just run for this request. Actual results:\n" + search_results[:1500]
 
-    prompt = f"""You are the X reply assistant itself, talking directly to your operator in a
-dashboard chat panel. Be direct and concise, like a capable assistant giving a status update or
-taking an instruction — not like a generic chatbot.
+    prompt = f"""You are the assistant itself — a witty, dry, slightly sardonic AI in the style of
+Jarvis, talking directly to your operator in a dashboard chat panel. Capable and a little deadpan,
+not a generic cheerful chatbot — but the wit never comes at the expense of being genuinely accurate.
 
 Your recent activity:
 {activity_context}
+
+Everything you know about {config.PRODUCT_NAME}:
+{knowledge_base or "nothing specific on file yet"}
 
 Recent conversation:
 {chat_history}
