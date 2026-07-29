@@ -80,10 +80,109 @@ def get_db():
 def init_db():
     with get_db() as conn:
         conn.executescript(SCHEMA)
-        # sensible defaults
         conn.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES ('active', '1')"
         )
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+            ("kairo_knowledge", DEFAULT_KAIRO_KNOWLEDGE),
+        )
+
+
+# ─── Kairo knowledge base — grows over time, never hardcoded/frozen ─────────
+DEFAULT_KAIRO_KNOWLEDGE = """KAIRO — Customer acquisition tool for solo founders.
+
+POSITIONING: "Reddit is leaking customer intent right now." Kairo scans Reddit
+24/7, finds people already asking for a tool like yours, scores their buying
+intent, and drafts a reply — so founders stop manually searching Reddit for
+hours and instead wake up to customers already found.
+
+HOW IT WORKS (4 steps):
+1. Paste your site URL — Kairo reads your product, understands your customer,
+   maps which subreddits they hang out in.
+2. Kairo hunts — scans Reddit every 15 minutes, scores every post for buying
+   intent, pain signals, and competitor frustration.
+3. You see real leads — each lead labeled (active/passive), scored, with a
+   decay timer showing how long the window stays hot.
+4. Reply with confidence — Kairo drafts a value-first, human-sounding reply
+   calibrated to the signal type. One click opens the Reddit thread.
+
+THE TWO DEMAND TYPES (important — changes how a reply should be written):
+- ACTIVE DEMAND ("shopping right now"): posts like "what tool do you use for
+  X?", "looking for software that...", "can anyone recommend...". High intent,
+  short window. Reply fast, be direct, mentioning the product is natural here.
+- PASSIVE DEMAND ("doesn't know you exist yet"): posts like "I hate how long X
+  takes", "there has to be a better way", "why is this so expensive?". Lead
+  with empathy, add value first, do NOT pitch immediately — the product should
+  only come up if it's earned, often not in the first reply at all.
+
+STATS (from the live landing page, for context/color in replies — treat as
+illustrative, not guaranteed current numbers to quote as fact to strangers):
+~847 posts scanned daily, ~9.2 avg intent score, ~23 min avg lead window,
+results in about 2 minutes from pasting a URL.
+
+PRICING:
+- Starter: $29/month — 10 leads/day, 3 subreddits monitored, active/passive
+  labels, decay timers, "Karma Builder" feature. First month free (limited
+  spots).
+- Pro: free for 1 month then $49/month — 50 leads/day, 10 subreddits, AI draft
+  replies, email alerts for critical leads.
+- Unlimited: $99/month — unlimited leads/subreddits, competitor tracking,
+  priority support.
+- No credit card required to start, upgrade anytime.
+
+TONE/POSITIONING NOTES: "Distribution is the only problem that matters" — most
+founders can build, few can distribute. Kairo frames itself as the distribution
+unlock, not just a scraping tool. Built specifically for solo founders, not
+agencies or enterprises."""
+
+
+def get_knowledge_base() -> str:
+    return get_setting("kairo_knowledge", DEFAULT_KAIRO_KNOWLEDGE)
+
+
+def append_knowledge(fact: str):
+    current = get_knowledge_base()
+    updated = current.rstrip() + f"\n\n[Added by operator]: {fact.strip()}"
+    set_setting("kairo_knowledge", updated)
+
+
+# ─── Scan status/stats — proof-of-life for the background loop ─────────────
+def set_scan_status(status: str):
+    set_setting("scan_status", status)
+
+
+def get_scan_status() -> str:
+    return get_setting("scan_status", "Idle — waiting for next cycle")
+
+
+def record_scan_completed():
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('scan_count', '0') "
+            "ON CONFLICT(key) DO NOTHING"
+        )
+        row = conn.execute("SELECT value FROM settings WHERE key = 'scan_count'").fetchone()
+        count = int(row["value"]) + 1 if row else 1
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('scan_count', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(count),),
+        )
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('last_scan_at', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(time.time()),),
+        )
+
+
+def get_scan_stats() -> dict:
+    last_scan_at = get_setting("last_scan_at")
+    return {
+        "status": get_scan_status(),
+        "last_scan_at": float(last_scan_at) if last_scan_at else None,
+        "scan_count": int(get_setting("scan_count", "0")),
+    }
 
 
 # ─── Threads already seen (avoid re-processing the same thread every scan) ─

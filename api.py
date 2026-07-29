@@ -13,6 +13,7 @@ from pydantic import BaseModel
 import storage
 import agent
 import llm
+import config
 
 router = APIRouter()
 
@@ -29,6 +30,8 @@ def get_feed():
         "counts": counts,
         "active": storage.is_active(),
         "recent_activity": storage.get_recent_activity(10),
+        "scan": storage.get_scan_stats(),
+        "scan_interval_seconds": config.SCAN_INTERVAL_SECONDS,
     }
 
 
@@ -46,6 +49,27 @@ def approve(draft_id: int, body: ApproveRequest):
 def skip(draft_id: int):
     agent.skip_draft(draft_id)
     return {"success": True}
+
+
+@router.post("/api/drafts/approve-all")
+def approve_all():
+    """Approves every currently pending draft in one go, returning each one's
+    intent URL (or the answer-saved result for knowledge questions) so the
+    frontend can open them all for the operator to tap through."""
+    pending = storage.get_pending_drafts()
+    results = []
+    for draft in pending:
+        if draft["draft_type"] == "knowledge_question":
+            continue  # these need a typed answer, can't be batch-approved blindly
+        success, error, intent_url = agent.approve_draft(draft["id"])
+        results.append({
+            "id": draft["id"],
+            "success": success,
+            "error": error,
+            "intent_url": intent_url,
+            "handle": draft["author_handle"],
+        })
+    return {"results": results}
 
 
 # ─── Chat panel ─────────────────────────────────────────────────────────────
@@ -85,7 +109,13 @@ def chat(body: ChatRequest):
     if urls:
         page_content = agent.fetch_url_for_chat(urls[0])
 
-    turn = llm.chat_turn(body.message, activity_text, history_text, page_content)
+    knowledge_base = storage.get_knowledge_base()
+
+    turn = llm.chat_turn(body.message, activity_text, history_text, page_content, knowledge_base)
+
+    if turn.get("new_kairo_fact"):
+        storage.append_knowledge(turn["new_kairo_fact"])
+        storage.log_activity(f"Learned something new about {llm.config.PRODUCT_NAME} from chat")
 
     if turn.get("reply"):
         reply = turn["reply"]
@@ -95,7 +125,7 @@ def chat(body: ChatRequest):
             "\n".join(f"- {r['title']}: {r['snippet']}" for r in results)
             if results else "(search ran but returned no usable results)"
         )
-        reply = llm.chat_respond(body.message, activity_text, history_text, page_content, search_results_text)
+        reply = llm.chat_respond(body.message, activity_text, history_text, page_content, search_results_text, knowledge_base)
     else:
         reply = "Sorry, I couldn't process that — try again?"
 

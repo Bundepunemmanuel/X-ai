@@ -112,22 +112,32 @@ def scan_and_draft(xb: XBrowser):
     """One scan cycle: search for candidate threads, classify, draft, queue for review."""
     if not storage.is_active():
         print("[agent] paused, skipping scan")
+        storage.set_scan_status("Paused")
         return
 
     query = random.choice(SEARCH_QUERIES)
     print(f"[agent] scanning: {query}")
+    storage.set_scan_status(f'🔍 Searching: "{query}"...')
     candidates = xb.search_recent_posts(query, max_results=5)
 
-    for post in candidates:
+    total = len(candidates)
+    storage.set_scan_status(f"Found {total} candidate{'s' if total != 1 else ''}, checking each..." if total else "No candidates found this cycle")
+
+    new_drafts = 0
+    for i, post in enumerate(candidates, start=1):
         if storage.has_seen_thread(post["url"]):
             continue
         storage.mark_thread_seen(post["url"])
 
+        storage.set_scan_status(f"Reading thread {i}/{total} ({post['handle']})...")
         thread = xb.read_thread(post["url"])
         existing_replies_text = "\n".join(thread["replies"][:5])
 
+        knowledge_base = storage.get_knowledge_base()
+
+        storage.set_scan_status(f"Classifying thread {i}/{total}...")
         classification = llm.classify_thread(
-            thread["post_text"] or post["text"], existing_replies_text, ""
+            thread["post_text"] or post["text"], existing_replies_text, "", knowledge_base
         )
         time.sleep(5)  # spacing so a burst of candidates doesn't trip Gemini's RPM ceiling
 
@@ -135,15 +145,33 @@ def scan_and_draft(xb: XBrowser):
             print(f"[agent] skipping {post['url']}: {classification['reasoning']}")
             continue
 
+        if classification["action"] == "ask_operator":
+            storage.add_draft(
+                thread_url=post["url"],
+                author_handle=post["handle"],
+                author_name=post["name"],
+                original_post=thread["post_text"] or post["text"],
+                context_snippet=existing_replies_text[:300],
+                pain_quote=classification.get("pain_quote"),
+                draft_type="knowledge_question",
+                draft_text=classification.get("operator_question") or "Need more info to draft this one.",
+                style_key="knowledge_question",
+            )
+            storage.log_activity(f"Question for you about {config.PRODUCT_NAME}, re: {post['handle']}'s post")
+            new_drafts += 1
+            continue
+
         if classification["action"] == "mention" and not _can_review_mention_today():
             print("[agent] mention review cap reached today, skipping")
             continue
 
+        storage.set_scan_status(f"Drafting reply for thread {i}/{total}...")
         draft_text = llm.draft_reply(
             classification["action"],
             thread["post_text"] or post["text"],
             existing_replies_text,
             classification.get("pain_quote"),
+            knowledge_base,
         )
         time.sleep(5)
 
@@ -163,18 +191,33 @@ def scan_and_draft(xb: XBrowser):
             style_key=classification["action"],
         )
         storage.log_activity(f"New draft ({classification['action']}) for {post['handle']}")
+        new_drafts += 1
+
+    storage.set_scan_status(f"Scan complete — {new_drafts} new draft{'s' if new_drafts != 1 else ''} added")
+    storage.record_scan_completed()
 
 
 def approve_draft(draft_id: int, edited_text: str = None):
     """Called from the API when the user taps Approve. Returns
     (success: bool, error: str or None, intent_url: str or None).
-    Does NOT post anything server-side — generates the tap-to-send link and
-    marks the draft ready, since sending itself happens on the operator's phone."""
+    For normal drafts: generates the tap-to-send link, doesn't post anything itself.
+    For knowledge_question drafts: the "edited_text" IS the operator's answer —
+    saved to the knowledge base instead of building any X link."""
     draft = storage.get_draft(draft_id)
     if not draft:
         return False, "Draft not found", None
-    text_to_post = edited_text if edited_text else draft["draft_text"]
     draft_type = draft["draft_type"]
+
+    if draft_type == "knowledge_question":
+        answer = (edited_text or "").strip()
+        if not answer:
+            return False, "Type an answer before saving", None
+        storage.append_knowledge(f"Q: {draft['draft_text']} — A: {answer}")
+        storage.update_draft_status(draft_id, "approved", draft_text=answer)
+        storage.log_activity(f"Learned something new about {config.PRODUCT_NAME} from your answer")
+        return True, None, None
+
+    text_to_post = edited_text if edited_text else draft["draft_text"]
 
     if draft_type == "original_post":
         intent_url = build_post_intent_url(text_to_post)

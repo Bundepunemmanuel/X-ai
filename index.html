@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reply Assistant</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="header">
+      <div class="header-top">
+        <h1>Reply Assistant</h1>
+        <button id="active-toggle" class="pill">
+          <span class="dot"></span>
+          <span id="active-label">Active</span>
+        </button>
+      </div>
+      <div class="stats">
+        <span><b id="stat-pending">0</b> waiting</span>
+        <span><b id="stat-posted">0</b> ready to send</span>
+        <span><b id="stat-skipped">0</b> skipped</span>
+      </div>
+      <p style="font-size:11px;color:#6B7480;padding-bottom:10px;">
+        Scanning &amp; drafting are automatic. Tapping Approve opens X on your phone — tap X's own Post button to send.
+      </p>
+      <div class="tabs">
+        <button class="tab active" data-tab="feed">Feed</button>
+        <button class="tab" data-tab="chat">Chat</button>
+      </div>
+    </header>
+
+    <main id="feed-view">
+      <div id="scan-banner">
+        <div class="scan-status-line">
+          <span class="scan-dot"></span>
+          <span id="scan-status-text">Idle</span>
+        </div>
+        <div class="scan-meta-line">
+          <span id="scan-last">Last scan: —</span>
+          <span id="scan-count">0 scans total</span>
+        </div>
+      </div>
+      <div id="feed-toolbar">
+        <button id="mode-toggle" class="toolbar-btn">Review mode</button>
+        <button id="approve-all-btn" class="toolbar-btn accent">Approve All</button>
+      </div>
+      <div id="review-nav" class="hidden">
+        <span id="review-position">1 of 1</span>
+      </div>
+      <div id="feed-list"></div>
+    </main>
+
+    <main id="chat-view" class="hidden">
+      <div id="chat-status-strip">
+        <span class="chat-status-dot"></span>
+        <span id="chat-status-text">ONLINE — awaiting instruction</span>
+      </div>
+      <div id="chat-messages"></div>
+      <div id="chat-input-row">
+        <input id="chat-input" type="text" placeholder="Tell it what to do, or ask about its activity..." />
+        <button id="chat-send">Send</button>
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>
